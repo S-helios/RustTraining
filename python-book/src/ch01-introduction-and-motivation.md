@@ -404,6 +404,7 @@ graph LR
         PY_GIL --> PY_OS["OS / Hardware"]
     end
 
+    PY ~~~ RS
     subgraph RS["🦀 Rust"]
         direction TB
         RS_CODE["Your Code"] --> RS_NONE["No runtime overhead"]

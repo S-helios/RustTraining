@@ -84,23 +84,23 @@ async fn handle_connection(conn: Connection, mut shutdown: watch::Receiver<bool>
 
 ```mermaid
 sequenceDiagram
-    participant OS as OS Signal
-    participant Main as Main Task
-    participant WCH as watch Channel
-    participant W1 as Worker 1
-    participant W2 as Worker 2
+    participant OS as 操作系统信号
+    participant Main as 主任务
+    participant WCH as watch 通道
+    participant W1 as 工作任务 1
+    participant W2 as 工作任务 2
 
     OS->>Main: SIGINT (Ctrl+C)
     Main->>WCH: send(true)
     WCH-->>W1: changed()
     WCH-->>W2: changed()
 
-    Note over W1: Finish current request
-    Note over W2: Finish current request
+    Note over W1: 完成当前请求
+    Note over W2: 完成当前请求
 
-    W1-->>Main: Task complete
-    W2-->>Main: Task complete
-    Main->>Main: All workers done → exit
+    W1-->>Main: 任务完成
+    W2-->>Main: 任务完成
+    Main->>Main: 所有工作任务结束 → 退出
 ```
 
 ### 使用有界通道实现背压
@@ -468,4 +468,3 @@ async fn main() {
 > **另请参阅：** [第 8 章——深入 Tokio](ch08-tokio-deep-dive.md) 的通道与同步原语；[第 12 章——常见陷阱](ch12-common-pitfalls.md) 的关闭过程取消风险。
 
 ***
-

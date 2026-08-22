@@ -37,12 +37,7 @@ const BOOKS: &[(&str, &str, &str, &str)] = &[
         "Future、Pin、执行器、Tokio、Stream 与生产实践的完整中文翻译和深入解读",
         "deep-dive",
     ),
-    (
-        "notes-blog",
-        "Xihe dev",
-        "NAN NAN NAN",
-        "notes",
-    ),
+    ("notes-blog", "xihe dev", "NAN NAN NAN", "notes"),
     (
         "rust-patterns-book",
         "Rust Patterns",
@@ -124,7 +119,9 @@ fn cmd_deploy() {
         std::process::exit(1);
     }
     build_to("docs");
-    println!("\nTo publish, commit docs/ and enable GitHub Pages → \"Deploy from a branch\" → /docs.");
+    println!(
+        "\nTo publish, commit docs/ and enable GitHub Pages → \"Deploy from a branch\" → /docs."
+    );
 }
 
 fn check_mdbook() -> bool {
@@ -208,24 +205,35 @@ fn write_landing_page(site: &Path) {
 
     let html = format!(
         r##"<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Rust Training Books</title>
   <style>
     :root {{
-      --bg: #1a1a2e;
-      --card-bg: #16213e;
-      --accent: #e94560;
-      --text: #eee;
-      --muted: #a8a8b3;
+      color-scheme: light;
+      --bg: #f6f7fb;
+      --card-bg: #ffffff;
+      --accent: #c53b53;
+      --text: #202536;
+      --muted: #62697a;
+      --border: rgba(26, 32, 52, 0.12);
       --clr-bridge: #4ade80;
       --clr-deep-dive: #22d3ee;
       --clr-advanced: #fbbf24;
       --clr-expert: #c084fc;
       --clr-practices: #2dd4bf;
       --clr-notes: #fb7185;
+    }}
+    :root[data-theme="dark"] {{
+      color-scheme: dark;
+      --bg: #1a1a2e;
+      --card-bg: #16213e;
+      --accent: #ff667f;
+      --text: #eee;
+      --muted: #a8a8b3;
+      --border: rgba(255,255,255,0.08);
     }}
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     body {{
@@ -237,6 +245,7 @@ fn write_landing_page(site: &Path) {
       flex-direction: column;
       align-items: center;
       padding: 3rem 1rem;
+      transition: background 0.2s, color 0.2s;
     }}
     h1 {{ font-size: 2.5rem; margin-bottom: 0.5rem; }}
     h1 span {{ color: var(--accent); }}
@@ -268,13 +277,13 @@ fn write_landing_page(site: &Path) {
       text-decoration: none;
       color: var(--text);
       transition: transform 0.15s, box-shadow 0.15s;
-      border: 1px solid rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
       border-left: 4px solid var(--stripe);
     }}
     .card:hover {{
       transform: translateY(-4px);
       box-shadow: 0 8px 25px color-mix(in srgb, var(--stripe) 30%, transparent);
-      border-color: rgba(255,255,255,0.08);
+      border-color: var(--border);
       border-left-color: var(--stripe);
     }}
     .card h2 {{ font-size: 1.2rem; margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }}
@@ -297,9 +306,16 @@ fn write_landing_page(site: &Path) {
     }}
 
     footer {{ margin-top: 3rem; color: var(--muted); font-size: 0.85rem; }}
+    .theme-toggle {{
+      position: fixed; top: 1rem; right: 1rem;
+      border: 1px solid var(--border); border-radius: 999px;
+      background: var(--card-bg); color: var(--text);
+      cursor: pointer; font: inherit; padding: 0.55rem 0.8rem;
+    }}
   </style>
 </head>
 <body>
+  <button class="theme-toggle" id="theme-toggle" type="button" aria-label="切换亮色或暗色主题">🌙 暗色</button>
   <h1>🦀 <span>Rust</span> Training Books</h1>
   <p class="subtitle">Pick the guide that matches your background</p>
 
@@ -316,6 +332,25 @@ fn write_landing_page(site: &Path) {
 {cards}
   </div>
   <footer>Built with <a href="https://rust-lang.github.io/mdBook/" style="color:var(--accent)">mdBook</a></footer>
+  <script>
+    (() => {{
+      const root = document.documentElement;
+      const button = document.getElementById('theme-toggle');
+      const saved = localStorage.getItem('rust-training-theme');
+      if (saved === 'dark' || saved === 'light') root.dataset.theme = saved;
+      const render = () => {{
+        const dark = root.dataset.theme === 'dark';
+        button.textContent = dark ? '☀️ 亮色' : '🌙 暗色';
+        button.setAttribute('aria-pressed', String(dark));
+      }};
+      button.addEventListener('click', () => {{
+        root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
+        localStorage.setItem('rust-training-theme', root.dataset.theme);
+        render();
+      }});
+      render();
+    }})();
+  </script>
 </body>
 </html>
 "##

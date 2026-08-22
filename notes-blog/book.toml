@@ -1,7 +1,7 @@
 [book]
-title = "Xihe 的技术笔记"
-authors = ["Xihe"]
-description = "面向 AI Agent、Rust 与工程实践的分类技术笔记，中英文资料对照与深入解读。"
+title = "xihe dev"
+authors = ["xihe"]
+description = "xihe dev 的分类博客：AI Agent、Rust 与工程实践，中英文资料对照与深入解读。"
 language = "zh-CN"
 src = "src"
 
@@ -10,11 +10,12 @@ build-dir = "book"
 create-missing = false
 
 [output.html]
-default-theme = "navy"
-preferred-dark-theme = "navy"
+default-theme = "light"
+preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/earendil-works/pi"
 edit-url-template = "https://github.com/earendil-works/pi/edit/harness-v2/j4/packages/agent/docs/{path}"
 additional-css = ["theme/bilingual.css"]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
 [output.html.fold]
 enable = true

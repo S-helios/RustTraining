@@ -35,20 +35,20 @@ async fn also_good_handler() -> String {
 
 ```mermaid
 graph TB
-    subgraph "❌ Blocking Call on Executor"
-        T1_BAD["Thread 1: std::fs::read()<br/>🔴 BLOCKED for 500ms"]
-        T2_BAD["Thread 2: handling requests<br/>🟢 Working alone"]
-        TASKS_BAD["100 pending tasks<br/>⏳ Starved"]
-        T1_BAD -->|"can't poll"| TASKS_BAD
+    subgraph "❌ 在执行器线程中调用阻塞函数"
+        T1_BAD["线程 1：std::fs::read()<br/>🔴 阻塞 500 毫秒"]
+        T2_BAD["线程 2：处理请求<br/>🟢 独自承担工作"]
+        TASKS_BAD["100 个待处理任务<br/>⏳ 得不到执行机会"]
+        T1_BAD -->|"无法轮询"| TASKS_BAD
     end
 
     subgraph "✅ spawn_blocking"
-        T1_GOOD["Thread 1: polling futures<br/>🟢 Available"]
-        T2_GOOD["Thread 2: polling futures<br/>🟢 Available"]
-        BT["Blocking pool thread:<br/>std::fs::read()<br/>🔵 Separate pool"]
-        TASKS_GOOD["100 tasks<br/>✅ All making progress"]
-        T1_GOOD -->|"polls"| TASKS_GOOD
-        T2_GOOD -->|"polls"| TASKS_GOOD
+        T1_GOOD["线程 1：轮询 Future<br/>🟢 可继续工作"]
+        T2_GOOD["线程 2：轮询 Future<br/>🟢 可继续工作"]
+        BT["阻塞线程池中的线程：<br/>std::fs::read()<br/>🔵 独立线程池"]
+        TASKS_GOOD["100 个任务<br/>✅ 都能持续推进"]
+        T1_GOOD -->|"轮询"| TASKS_GOOD
+        T2_GOOD -->|"轮询"| TASKS_GOOD
     end
 ```
 

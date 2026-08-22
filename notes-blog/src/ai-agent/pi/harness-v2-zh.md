@@ -4,16 +4,16 @@
 
 ```mermaid
 flowchart TD
-    App[Application / UI] -->|prompt, steer, abort, config| Harness
-    Harness -->|snapshots + events| App
-    Harness -->|hooks + events| Ext[Extensions]
-    Harness --> Lanes[Lanes: main, ...<br/>one operation each, parallel]
-    Lanes --> Loop[Step primitives<br/>request / tools]
-    Loop --> Provider[LLM provider]
-    Loop --> Tools[Tools]
-    Harness --> Session[Session<br/>tree · lanes · operation logs · global facts]
-    Session --> Storage[(memory / JSONL / SQLite)]
-    Harness -.->|telemetry| Obs[Observability]
+    App[应用 / 用户界面] -->|提示、引导、中止、配置| Harness
+    Harness -->|快照与事件| App
+    Harness -->|钩子与事件| Ext[扩展]
+    Harness --> Lanes[执行通道：main 等<br/>每条通道一项操作，并行运行]
+    Lanes --> Loop[单步执行原语<br/>请求 / 工具]
+    Loop --> Provider[大模型 Provider]
+    Loop --> Tools[工具]
+    Harness --> Session[会话<br/>树 · 执行通道 · 操作日志 · 全局事实]
+    Session --> Storage[(内存 / JSONL / SQLite)]
+    Harness -.->|遥测| Obs[可观测性]
 ```
 
 Harness 针对一个会话执行 run。会话保存四类状态（第 2 节）。多个 lane 在同一个 Harness 内并行执行（第 3 节）。存储后端负责对会话进行编码（第三部分）。
@@ -148,15 +148,19 @@ step 是操作内部可重试的工作单元，例如生成 assistant 消息、�
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Idle: restored, no open operation
-    [*] --> Suspended: restored, open operation
-    Idle --> Running: operation accepted
-    Running --> Idle: finished
-    Running --> Cancelling: abort
-    Cancelling --> Idle: reconciled
-    Running --> Suspended: deferred handle persisted
-    Suspended --> Running: resume continues the open operation
-    Suspended --> Cancelling: abort
+    state "空闲" as Idle
+    state "已挂起" as Suspended
+    state "运行中" as Running
+    state "取消中" as Cancelling
+    [*] --> Idle: 还原后没有打开的操作
+    [*] --> Suspended: 还原后存在打开的操作
+    Idle --> Running: 操作已接受
+    Running --> Idle: 操作完成
+    Running --> Cancelling: 请求中止
+    Cancelling --> Idle: 收敛处理完成
+    Running --> Suspended: 延迟句柄已持久化
+    Suspended --> Running: resume 继续打开的操作
+    Suspended --> Cancelling: 请求中止
 ```
 
 - 状态以 lane 为单位。唯一例外是存储写入失败会使整个 Harness 进入 faulted 状态。处于 faulted 状态的 Harness 会停止所有副作用并拒绝所有调用；问题修复后，重新打开会从记录中还原每个 lane。

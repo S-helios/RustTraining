@@ -51,7 +51,7 @@ Pick the book that matches your background. Books are grouped by complexity so y
 | [**Rust for Python Programmers**](https://microsoft.github.io/RustTraining/python-book/) | 🟢 Bridge | Dynamic → static typing, GIL-free concurrency |
 | [**Async Rust**](https://microsoft.github.io/RustTraining/async-book/) | 🔵 Deep Dive | Tokio, streams, cancellation safety |
 | [**Async Rust 中文版**](https://sunp.xyz/async-book-zh/) | 🔵 Deep Dive | Future、Pin、执行器、Tokio、Stream 与生产实践的完整中文翻译和深入解读 |
-| [**Xihe 的技术笔记**](https://sunp.xyz/notes-blog/) | 📝 Notes | AI Agent、Pi Harness、Rust 与工程实践的分类双语笔记 |
+| [**xihe dev**](https://sunp.xyz/notes-blog/) | 📝 Notes | AI Agent、Pi Harness、Rust 与工程实践的分类双语内容 |
 | [**Rust Patterns**](https://microsoft.github.io/RustTraining/rust-patterns-book/) | 🟡 Advanced | Pin, allocators, lock-free structures, unsafe |
 | [**Type-Driven Correctness**](https://microsoft.github.io/RustTraining/type-driven-correctness-book/) | 🟣 Expert | Type-state, phantom types, capability tokens |
 | [**Rust Engineering Practices**](https://microsoft.github.io/RustTraining/engineering-book/) | 🟤 Practices | Build scripts, cross-compilation, CI/CD, Miri |

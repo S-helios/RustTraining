@@ -81,6 +81,10 @@ impl Future for FetchTwoPagesStateMachine {
 
 ```mermaid
 stateDiagram-v2
+    state "开始" as Start
+    state "等待第 1 页" as WaitingPage1
+    state "等待第 2 页" as WaitingPage2
+    state "已完成" as Complete
     [*] --> Start
     Start --> WaitingPage1: 创建第一个 http_get Future
     WaitingPage1 --> WaitingPage1: poll() → Pending

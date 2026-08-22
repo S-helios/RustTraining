@@ -19,6 +19,7 @@ fi
 
 cd "${repo_root}"
 cargo xtask build
+export COPYFILE_DISABLE=1
 
 for required in \
     site/index.html \

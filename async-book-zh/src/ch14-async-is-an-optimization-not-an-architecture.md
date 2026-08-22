@@ -274,13 +274,13 @@ let report = tokio::runtime::Runtime::new().unwrap().block_on(
 
 ```mermaid
 graph TD
-    START["Should this function be async?"] --> IO{"Does it do I/O?"}
-    IO -->|No| SYNC["sync fn — always"]
-    IO -->|Yes| BOUNDARY{"Is it at the boundary?<br/>handler, main loop, accept()"}
-    BOUNDARY -->|Yes| ASYNC_SHELL["async fn — this is the shell"]
-    BOUNDARY -->|No| CORE_IO{"Is the I/O the core logic?<br/>fan-out, streaming, stateful conn"}
-    CORE_IO -->|Yes| ASYNC_CORE["async fn — justified"]
-    CORE_IO -->|No| EXTRACT["Extract logic into sync fn.<br/>Pass I/O results in as arguments."]
+    START["这个函数应该是异步的吗？"] --> IO{"它是否执行 I/O？"}
+    IO -->|否| SYNC["始终使用 sync fn"]
+    IO -->|是| BOUNDARY{"它是否位于系统边界？<br/>处理器、主循环、accept()"}
+    BOUNDARY -->|是| ASYNC_SHELL["使用 async fn<br/>这里是异步外壳"]
+    BOUNDARY -->|否| CORE_IO{"I/O 是否属于核心逻辑？<br/>扇出、流式处理、有状态连接"}
+    CORE_IO -->|是| ASYNC_CORE["使用 async fn<br/>这里有充分理由"]
+    CORE_IO -->|否| EXTRACT["把逻辑提取到 sync fn<br/>将 I/O 结果作为参数传入"]
 
     style SYNC fill:#d4efdf,stroke:#27ae60,color:#000
     style ASYNC_SHELL fill:#e8f4f8,stroke:#2980b9,color:#000

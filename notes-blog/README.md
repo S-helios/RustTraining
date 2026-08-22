@@ -1,4 +1,4 @@
-# Xihe 的技术笔记
+# xihe dev
 
 独立的分类笔记博客，使用 mdBook 构建。目前首先收录 Pi Agent Harness v2 设计文档的完整中英文对照翻译。
 

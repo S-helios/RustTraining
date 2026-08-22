@@ -12,6 +12,10 @@
 
 ```mermaid
 stateDiagram-v2
+    state "空闲" as Idle
+    state "轮询中" as Polling
+    state "等待中" as Waiting
+    state "已完成" as Complete
     [*] --> Idle : 创建 Future
     Idle --> Polling : 执行器调用 poll()
     Polling --> Complete : Ready(value)

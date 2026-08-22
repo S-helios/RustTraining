@@ -23,16 +23,16 @@
 
 ```mermaid
 graph LR
-    C1["Client 1<br/>(Alice)"] -->|TCP| SERVER["Chat Server"]
-    C2["Client 2<br/>(Bob)"] -->|TCP| SERVER
-    C3["Client 3<br/>(Carol)"] -->|TCP| SERVER
+    C1["客户端 1<br/>Alice"] -->|TCP| SERVER["聊天服务器"]
+    C2["客户端 2<br/>Bob"] -->|TCP| SERVER
+    C3["客户端 3<br/>Carol"] -->|TCP| SERVER
 
-    SERVER --> R1["#general<br/>broadcast channel"]
-    SERVER --> R2["#rust<br/>broadcast channel"]
+    SERVER --> R1["#general<br/>广播通道"]
+    SERVER --> R2["#rust<br/>广播通道"]
 
-    R1 -->|msg| C1
-    R1 -->|msg| C2
-    R2 -->|msg| C3
+    R1 -->|消息| C1
+    R1 -->|消息| C2
+    R2 -->|消息| C3
 
     CTRL["Ctrl+C"] -->|watch| SERVER
 

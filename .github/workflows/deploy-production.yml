@@ -16,6 +16,8 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: production
+    env:
+      PRODUCTION_DEPLOY_KEY: ${{ secrets.PRODUCTION_DEPLOY_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -42,14 +44,18 @@ jobs:
           command -v mdbook-mermaid >/dev/null || cargo install mdbook-mermaid --locked
 
       - name: Configure deploy key
-        env:
-          PRODUCTION_DEPLOY_KEY: ${{ secrets.PRODUCTION_DEPLOY_KEY }}
+        if: env.PRODUCTION_DEPLOY_KEY != ''
         run: |
           install -d -m 0700 ~/.ssh
           printf '%s\n' "$PRODUCTION_DEPLOY_KEY" > ~/.ssh/rust-training-deploy
           chmod 0600 ~/.ssh/rust-training-deploy
 
       - name: Build and deploy
+        if: env.PRODUCTION_DEPLOY_KEY != ''
         env:
           RUST_TRAINING_DEPLOY_KEY: /home/runner/.ssh/rust-training-deploy
         run: scripts/deploy-production.sh
+
+      - name: Deployment key not configured
+        if: env.PRODUCTION_DEPLOY_KEY == ''
+        run: echo "Skipping production deployment until PRODUCTION_DEPLOY_KEY is configured."

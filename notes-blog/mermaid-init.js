@@ -3,6 +3,19 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 (() => {
+    const migrationKey = 'xihe-dev-light-default-v1';
+    if (!localStorage.getItem(migrationKey)) {
+        const savedTheme = localStorage.getItem('mdbook-theme');
+        if (!savedTheme || savedTheme === 'navy') {
+            localStorage.setItem('mdbook-theme', 'light');
+        }
+        localStorage.setItem(migrationKey, 'done');
+        if (!document.documentElement.classList.contains('light')) {
+            window.location.reload();
+            return;
+        }
+    }
+
     const darkThemes = ['ayu', 'navy', 'coal'];
     const lightThemes = ['light', 'rust'];
 

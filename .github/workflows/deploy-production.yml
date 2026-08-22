@@ -1,0 +1,55 @@
+name: Deploy production site
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-site
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install mdBook tools
+        run: |
+          command -v mdbook >/dev/null || cargo install mdbook --locked
+          command -v mdbook-mermaid >/dev/null || cargo install mdbook-mermaid --locked
+
+      - name: Configure deploy key
+        env:
+          PRODUCTION_DEPLOY_KEY: ${{ secrets.PRODUCTION_DEPLOY_KEY }}
+        run: |
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$PRODUCTION_DEPLOY_KEY" > ~/.ssh/rust-training-deploy
+          chmod 0600 ~/.ssh/rust-training-deploy
+
+      - name: Build and deploy
+        env:
+          RUST_TRAINING_DEPLOY_KEY: /home/runner/.ssh/rust-training-deploy
+        run: scripts/deploy-production.sh

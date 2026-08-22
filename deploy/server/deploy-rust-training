@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+readonly SITE_ROOT=/mnt/services/nginx/www/rust-training
+readonly RELEASES_DIR="${SITE_ROOT}/releases"
+readonly LOCK_FILE="${SITE_ROOT}/.deploy.lock"
+readonly MAX_ARCHIVE_BLOCKS=1048576
+
+if [[ "${SSH_ORIGINAL_COMMAND:-}" != "deploy" ]]; then
+    echo "Only the deploy command is allowed." >&2
+    exit 64
+fi
+
+mkdir -p "${RELEASES_DIR}"
+exec 9>"${LOCK_FILE}"
+if ! flock -n 9; then
+    echo "Another deployment is already running." >&2
+    exit 75
+fi
+
+release_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+release_dir="${RELEASES_DIR}/${release_id}"
+next_link="${SITE_ROOT}/.current-${release_id}"
+archive_file="${SITE_ROOT}/.upload-${release_id}.tar.gz"
+
+cleanup() {
+    rm -f -- "${archive_file}"
+    rm -f -- "${next_link}"
+    if [[ ! -L "${SITE_ROOT}/current" || "$(readlink "${SITE_ROOT}/current" 2>/dev/null || true)" != "releases/${release_id}" ]]; then
+        rm -rf -- "${release_dir}"
+    fi
+}
+trap cleanup EXIT
+
+umask 0022
+ulimit -f "${MAX_ARCHIVE_BLOCKS}"
+cat >"${archive_file}"
+
+if ! tar -tzf "${archive_file}" | awk '
+    /^\// { bad = 1 }
+    /(^|\/)\.\.($|\/)/ { bad = 1 }
+    END { exit bad }
+'; then
+    echo "Deployment archive contains an unsafe path." >&2
+    exit 65
+fi
+
+mkdir -m 0755 "${release_dir}"
+tar \
+    --extract \
+    --gzip \
+    --file="${archive_file}" \
+    --directory="${release_dir}" \
+    --no-same-owner \
+    --no-same-permissions
+
+rm -f -- "${archive_file}"
+
+if find "${release_dir}" -type l -print -quit | grep -q .; then
+    echo "Deployment archives may not contain symbolic links." >&2
+    exit 65
+fi
+
+for required in \
+    index.html \
+    async-book/index.html \
+    async-book-zh/index.html \
+    notes-blog/index.html
+do
+    if [[ ! -s "${release_dir}/${required}" ]]; then
+        echo "Missing required site file: ${required}" >&2
+        exit 66
+    fi
+done
+
+chmod -R u=rwX,go=rX "${release_dir}"
+ln -s "releases/${release_id}" "${next_link}"
+mv -Tf "${next_link}" "${SITE_ROOT}/current"
+
+mapfile -t stale_releases < <(
+    find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
+        | sort -rn \
+        | tail -n +6 \
+        | cut -d' ' -f2-
+)
+for stale_release in "${stale_releases[@]}"; do
+    case "${stale_release}" in
+        "${RELEASES_DIR}"/*) rm -rf -- "${stale_release}" ;;
+        *) echo "Refusing to remove unexpected path: ${stale_release}" >&2; exit 67 ;;
+    esac
+done
+
+trap - EXIT
+echo "Activated release ${release_id}"

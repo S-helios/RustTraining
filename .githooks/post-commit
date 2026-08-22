@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+if [ "${SKIP_PRODUCTION_DEPLOY:-0}" = "1" ]; then
+    exit 0
+fi
+
+repo_root=$(git rev-parse --show-toplevel)
+exec "${repo_root}/scripts/deploy-production.sh"

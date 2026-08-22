@@ -12,7 +12,7 @@
 
 # Rust Training Books
 
-Seven training courses covering Rust from different programming backgrounds, plus deep-dives on async, advanced patterns, and engineering practices.
+Eight training courses covering Rust from different programming backgrounds, plus deep-dives on async, advanced patterns, engineering practices, and a categorized technical notes blog.
 
 This material combines original content with ideas and examples inspired by some of the best resources in the Rust ecosystem. The goal is to present an in-depth, technically accurate curriculum that weaves together knowledge scattered across books, blogs, conference talks, and video series into a cohesive, pedagogically structured experience.
 
@@ -50,6 +50,8 @@ Pick the book that matches your background. Books are grouped by complexity so y
 | [**Rust for C# Programmers**](https://microsoft.github.io/RustTraining/csharp-book/) | 🟢 Bridge | Swift / C# / Java → ownership & type system |
 | [**Rust for Python Programmers**](https://microsoft.github.io/RustTraining/python-book/) | 🟢 Bridge | Dynamic → static typing, GIL-free concurrency |
 | [**Async Rust**](https://microsoft.github.io/RustTraining/async-book/) | 🔵 Deep Dive | Tokio, streams, cancellation safety |
+| [**Async Rust 中文版**](https://sunp.xyz/async-book-zh/) | 🔵 Deep Dive | Future、Pin、执行器、Tokio、Stream 与生产实践的完整中文翻译和深入解读 |
+| [**Xihe 的技术笔记**](https://sunp.xyz/notes-blog/) | 📝 Notes | AI Agent、Pi Harness、Rust 与工程实践的分类双语笔记 |
 | [**Rust Patterns**](https://microsoft.github.io/RustTraining/rust-patterns-book/) | 🟡 Advanced | Pin, allocators, lock-free structures, unsafe |
 | [**Type-Driven Correctness**](https://microsoft.github.io/RustTraining/type-driven-correctness-book/) | 🟣 Expert | Type-state, phantom types, capability tokens |
 | [**Rust Engineering Practices**](https://microsoft.github.io/RustTraining/engineering-book/) | 🟤 Practices | Build scripts, cross-compilation, CI/CD, Miri |
@@ -108,4 +110,3 @@ cd c-cpp-book && mdbook serve --open    # http://localhost:3000
 The site auto-deploys to GitHub Pages on push to `main` via `.github/workflows/pages.yml`. No manual steps needed.
 
 </details>
-

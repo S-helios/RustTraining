@@ -32,6 +32,18 @@ const BOOKS: &[(&str, &str, &str, &str)] = &[
         "deep-dive",
     ),
     (
+        "async-book-zh",
+        "Async Rust：从 Future 到生产实践（中文版）",
+        "Future、Pin、执行器、Tokio、Stream 与生产实践的完整中文翻译和深入解读",
+        "deep-dive",
+    ),
+    (
+        "notes-blog",
+        "Xihe dev",
+        "NAN NAN NAN",
+        "notes",
+    ),
+    (
         "rust-patterns-book",
         "Rust Patterns",
         "Pin, allocators, lock-free structures, unsafe",
@@ -174,6 +186,7 @@ fn category_label(cat: &str) -> &str {
         "advanced" => "Advanced",
         "expert" => "Expert",
         "practices" => "Practices",
+        "notes" => "Notes",
         _ => cat,
     }
 }
@@ -212,6 +225,7 @@ fn write_landing_page(site: &Path) {
       --clr-advanced: #fbbf24;
       --clr-expert: #c084fc;
       --clr-practices: #2dd4bf;
+      --clr-notes: #fb7185;
     }}
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     body {{
@@ -272,6 +286,7 @@ fn write_landing_page(site: &Path) {
     .cat-advanced   {{ --stripe: var(--clr-advanced); }}
     .cat-expert     {{ --stripe: var(--clr-expert); }}
     .cat-practices  {{ --stripe: var(--clr-practices); }}
+    .cat-notes      {{ --stripe: var(--clr-notes); }}
 
     /* Label pill */
     .label {{
@@ -294,6 +309,7 @@ fn write_landing_page(site: &Path) {
     <span class="legend-item"><span class="legend-dot" style="background:var(--clr-advanced)"></span> Advanced</span>
     <span class="legend-item"><span class="legend-dot" style="background:var(--clr-expert)"></span> Expert</span>
     <span class="legend-item"><span class="legend-dot" style="background:var(--clr-practices)"></span> Practices</span>
+    <span class="legend-item"><span class="legend-dot" style="background:var(--clr-notes)"></span> Notes</span>
   </div>
 
   <div class="grid">

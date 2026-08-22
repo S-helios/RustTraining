@@ -1,0 +1,33 @@
+[book]
+title = "Xihe 的技术笔记"
+authors = ["Xihe"]
+description = "面向 AI Agent、Rust 与工程实践的分类技术笔记，中英文资料对照与深入解读。"
+language = "zh-CN"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/earendil-works/pi"
+edit-url-template = "https://github.com/earendil-works/pi/edit/harness-v2/j4/packages/agent/docs/{path}"
+additional-css = ["theme/bilingual.css"]
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand = true
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

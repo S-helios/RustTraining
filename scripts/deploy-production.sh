@@ -33,7 +33,7 @@ do
     fi
 done
 
-tar -C site -czf - . | ssh \
+tar --no-xattrs -C site -czf - . | ssh \
     -T \
     -i "${deploy_key}" \
     -o BatchMode=yes \

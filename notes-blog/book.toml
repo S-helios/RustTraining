@@ -1,7 +1,7 @@
 [book]
 title = "xihe dev"
 authors = ["xihe"]
-description = "xihe dev 的分类博客：AI Agent、Rust 与工程实践，中英文资料对照与深入解读。"
+description = "xihe dev 的分类博客：AI Agent、Rust 与工程实践的中文翻译和深入解读。"
 language = "zh-CN"
 src = "src"
 
@@ -12,9 +12,8 @@ create-missing = false
 [output.html]
 default-theme = "light"
 preferred-dark-theme = "ayu"
-git-repository-url = "https://github.com/earendil-works/pi"
-edit-url-template = "https://github.com/earendil-works/pi/edit/harness-v2/j4/packages/agent/docs/{path}"
-additional-css = ["theme/bilingual.css"]
+git-repository-url = "https://github.com/S-helios/RustTraining"
+edit-url-template = "https://github.com/S-helios/RustTraining/edit/main/notes-blog/src/{path}"
 additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
 [output.html.fold]

@@ -45,8 +45,8 @@
 |---------|-----------|-----------|--------|----------|
 | `mpsc` | N | 1 | Stream | Work queues, event buses |
 | `oneshot` | 1 | 1 | Single | Request/response, completion notification |
-| `broadcast` | N | N | All recv all | Fan-out notifications, shutdown signals |
-| `watch` | 1 | N | Latest only | Config updates, health status |
+| `broadcast` | N | N | Bounded, lossy fan-out | Live notifications where lag can be detected and tolerated |
+| `watch` | 1 | N | Latest only | Config updates, health status, shutdown state |
 
 ### Mutex Selection Guide
 
@@ -73,7 +73,7 @@ Choosing runtime?
 
 Need concurrent futures?
 ├── Can be 'static + Send → tokio::spawn
-├── Can be 'static + !Send → LocalSet
+├── Can be 'static + !Send → LocalSet + spawn_local
 ├── Can't be 'static → FuturesUnordered
 └── Need to track/abort → JoinSet
 ```
@@ -82,7 +82,7 @@ Need concurrent futures?
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `future is not Send` | Holding `!Send` type across `.await` | Scope the value so it's dropped before `.await`, or use `current_thread` runtime |
+| `future is not Send` | Holding `!Send` type across `.await` | Drop it before `.await`, await directly, or use `LocalSet::spawn_local`; `current_thread` alone does not change `tokio::spawn` |
 | `borrowed value does not live long enough` in spawn | `tokio::spawn` requires `'static` | Use `Arc`, `clone()`, or `FuturesUnordered` |
 | `the trait Future is not implemented for ()` | Missing `.await` | Add `.await` to the async call |
 | `cannot borrow as mutable` in poll | Self-referential borrow | Use `Pin<&mut Self>` correctly (see Ch. 4) |
@@ -103,4 +103,3 @@ Need concurrent futures?
 ***
 
 *End of Async Rust Training Guide*
-

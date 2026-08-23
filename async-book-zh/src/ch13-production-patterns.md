@@ -3,7 +3,7 @@
 > **你将学到什么：**
 > - 使用 `watch` 通道与 `select!` 实现优雅关闭
 > - 背压：有界通道如何防止内存耗尽
-> - 结构化并发：`JoinSet` 与 `TaskTracker`
+> - 使用 `JoinSet` 与 `TaskTracker` 管理任务组生命周期
 > - 超时、重试和指数退避
 > - 错误处理：`thiserror`、`anyhow` 与双 `?` 模式
 > - Tower：Axum、Tonic、Hyper 使用的中间件模式
@@ -21,7 +21,7 @@ async fn main_server() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Spawn the server
-    let server_handle = tokio::spawn(run_server(shutdown_rx.clone()));
+    let mut server_handle = tokio::spawn(run_server(shutdown_rx.clone()));
 
     // Wait for Ctrl+C
     signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
@@ -35,33 +35,54 @@ async fn main_server() {
     // Wait for server to finish (with timeout)
     match tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        server_handle,
+        &mut server_handle,
     ).await {
         Ok(Ok(())) => println!("Server shut down gracefully"),
         Ok(Err(e)) => eprintln!("Server error: {e}"),
-        Err(_) => eprintln!("Server shutdown timed out — forcing exit"),
+        Err(_) => {
+            eprintln!("Server shutdown timed out — aborting remaining tasks");
+            server_handle.abort();
+            let _ = server_handle.await;
+        }
     }
 }
 
 async fn run_server(mut shutdown: watch::Receiver<bool>) {
+    let mut connections = tokio::task::JoinSet::new();
+
     loop {
         tokio::select! {
-            // Accept new connections
-            conn = accept_connection() => {
-                let shutdown = shutdown.clone();
-                tokio::spawn(handle_connection(conn, shutdown));
-            }
-            // Shutdown signal
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
+            // 这里有意采用固定优先级：一旦能够观察到关闭状态，
+            // 就不要抢先接收另一个已经就绪的新连接。
+            biased;
+
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
                     println!("Stopping accepting new connections");
                     break;
                 }
             }
+            // 正常运行期间及时回收已完成任务，避免其输出一直积累到关闭阶段。
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                if let Err(e) = result {
+                    eprintln!("Connection task failed: {e}");
+                }
+            }
+            // Accept new connections
+            conn = accept_connection() => {
+                let shutdown = shutdown.clone();
+                connections.spawn(handle_connection(conn, shutdown));
+            }
         }
     }
-    // In-flight connections will finish on their own
-    // because they have their own shutdown_rx clone
+
+    // 所有连接都观察同一个关闭状态。由于 JoinHandle 仍保存在 JoinSet 中，
+    // run_server 返回时可以保证连接任务确实全部结束，而不是变成失联的后台任务。
+    while let Some(result) = connections.join_next().await {
+        if let Err(e) = result {
+            eprintln!("Connection task failed during shutdown: {e}");
+        }
+    }
 }
 
 async fn handle_connection(conn: Connection, mut shutdown: watch::Receiver<bool>) {
@@ -71,8 +92,8 @@ async fn handle_connection(conn: Connection, mut shutdown: watch::Receiver<bool>
                 // Process the request fully — don't abandon mid-request
                 process_request(request).await;
             }
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
                     // Finish current request, then exit
                     break;
                 }
@@ -138,9 +159,9 @@ async fn backpressure_example() {
 // Producer can fill memory indefinitely
 ```
 
-### 结构化并发：JoinSet 与 TaskTracker
+### 任务组：JoinSet 与 TaskTracker
 
-`JoinSet` 将相关任务组合起来，并确保能够等待它们全部完成：
+`JoinSet` 把相关任务组织成一组，使所有者能够收集每个结果并避免任务失联。它有助于建立结构化的任务生命周期，但自身并不提供完整的结构化并发保证：取消策略、错误传播以及丢弃任务组的含义，仍必须由应用明确设计。
 
 ```rust
 use tokio::task::JoinSet;
@@ -183,8 +204,11 @@ async fn with_tracker() {
         });
     }
 
-    tracker.close(); // No more tasks will be added
-    tracker.wait().await; // Wait for ALL tracked tasks
+    // close() 把跟踪器标记为已关闭，使 wait() 能在集合为空时完成。
+    // 它既不会取消任务，也不会禁止之后继续 spawn。
+    // 应用还必须通过所有权或协议单独阻止生产者继续添加工作。
+    tracker.close();
+    tracker.wait().await; // 等待当前跟踪的全部任务结束
     println!("All tasks finished");
 }
 ```
@@ -202,6 +226,11 @@ async fn with_timeout() -> Result<Response, Error> {
         Err(_) => Err(Error::Timeout),
     }
 }
+
+// timeout() 在期限到达时通过丢弃内部 Future 来取消操作。
+// 只有当操作具有取消安全性时才应直接这样使用；否则应把操作放入可跟踪任务，
+// 并明确规定它是否可以在后台继续完成。网络服务通常应维护一个端到端 deadline
+// 预算，再从中派生更短的连接、读取、写入与空闲期限，而不是每一层都重新获得完整超时。
 
 // Exponential backoff retry
 async fn retry_with_backoff<F, Fut, T, E>(
@@ -364,7 +393,7 @@ async fn with_timeout_context() -> Result<String, DiagError> {
 
 ### Tower：中间件模式
 
-[Tower](https://docs.rs/tower) 定义了可组合的 `Service` trait，是 Rust 异步中间件的骨架，Axum、Tonic、Hyper 都使用它：
+[Tower](https://docs.rs/tower) 定义了可组合的 `Service` trait，是 Rust 异步中间件的骨架，`axum`、`tonic`、`hyper` 都使用它：
 
 ```rust
 // Tower's core trait (simplified):
@@ -397,13 +426,13 @@ let service = ServiceBuilder::new()
 <details>
 <summary>🏋️ 练习（点击展开）</summary>
 
-**挑战**：构建一个任务处理器，包含基于通道的工作队列、N 个工作任务，并能在 Ctrl+C 时优雅关闭。工作任务退出前应完成手中正在处理的工作。
+**挑战**：构建一个任务处理器，包含基于通道的工作队列、N 个工作任务，并能在 Ctrl+C 时优雅关闭。先停止接收新工作，再排空已接收的排队工作并完成在途工作，然后退出。
 
 <details>
 <summary>🔑 答案</summary>
 
 ```rust
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 
 struct WorkItem { id: u64, payload: String }
@@ -411,23 +440,16 @@ struct WorkItem { id: u64, payload: String }
 #[tokio::main]
 async fn main() {
     let (work_tx, work_rx) = mpsc::channel::<WorkItem>(100);
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let work_rx = std::sync::Arc::new(tokio::sync::Mutex::new(work_rx));
 
     let mut handles = Vec::new();
     for id in 0..4 {
         let rx = work_rx.clone();
-        let mut shutdown = shutdown_rx.clone();
         handles.push(tokio::spawn(async move {
             loop {
                 let item = {
                     let mut rx = rx.lock().await;
-                    tokio::select! {
-                        item = rx.recv() => item,
-                        _ = shutdown.changed() => {
-                            if *shutdown.borrow() { None } else { continue }
-                        }
-                    }
+                    rx.recv().await
                 };
                 match item {
                     Some(work) => {
@@ -440,16 +462,30 @@ async fn main() {
         }));
     }
 
-    // Submit work
-    for i in 0..20 {
-        let _ = work_tx.send(WorkItem { id: i, payload: format!("task-{i}") }).await;
-        sleep(Duration::from_millis(50)).await;
-    }
+    // 生产者独占唯一的 Sender。生产者停止后，通道会在所有已接收工作
+    // 排空后关闭。
+    let producer = tokio::spawn(async move {
+        for i in 0..20 {
+            if work_tx
+                .send(WorkItem { id: i, payload: format!("task-{i}") })
+                .await
+                .is_err()
+            {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    });
 
     // On Ctrl+C: signal shutdown, wait for workers
     // NOTE: .unwrap() is used for brevity — handle errors in production.
     tokio::signal::ctrl_c().await.unwrap();
-    shutdown_tx.send(true).unwrap();
+    // 停止准入。中止生产者会丢弃最后一个 Sender；Worker 仍可接收
+    // 所有已经进入队列的工作。
+    producer.abort();
+    let _ = producer.await;
+
+    // 已关闭的通道排空后，recv() 才会返回 None。
     for h in handles { let _ = h.await; }
     println!("Shut down cleanly.");
 }
@@ -461,8 +497,8 @@ async fn main() {
 > **要点回顾——生产实践模式**
 > - 使用 `watch` 通道与 `select!` 协调优雅关闭
 > - 有界通道 `mpsc::channel(N)` 提供**背压**：缓冲区满时，发送者异步等待
-> - `JoinSet` 与 `TaskTracker` 提供**结构化并发**：跟踪、中止和等待任务组
-> - 网络操作始终应设置超时：`tokio::time::timeout(dur, fut)`
+> - `JoinSet` 与 `TaskTracker` 有助于跟踪和等待任务组；应用仍需定义如何停止接收新工作、如何取消以及如何传播错误
+> - 为网络工作设置明确的端到端 deadline 预算和分阶段期限，并确认超时后丢弃 Future 具有取消安全性
 > - Tower 的 `Service` trait 是生产级 Rust 服务的标准中间件模式
 
 > **另请参阅：** [第 8 章——深入 Tokio](ch08-tokio-deep-dive.md) 的通道与同步原语；[第 12 章——常见陷阱](ch12-common-pitfalls.md) 的关闭过程取消风险。

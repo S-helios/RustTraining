@@ -128,8 +128,10 @@ trait DataStore {
 // Now you have two traits:
 // - DataStore: no Send bound on the futures
 // - SendDataStore: all futures are Send
-// Both have the same methods, implementors implement DataStore
-// and get SendDataStore for free if their futures are Send.
+// Both have the same methods. Implement the generated SendDataStore when you
+// need its stronger contract; trait_variant provides the corresponding local
+// DataStore implementation. Implementing only DataStore cannot automatically
+// prove the stronger SendDataStore contract afterward.
 
 // Use SendDataStore when you need to spawn tasks:
 async fn spawn_lookup<S: SendDataStore + 'static>(store: Arc<S>) {
@@ -148,7 +150,7 @@ async fn spawn_lookup<S: SendDataStore + 'static>(store: Arc<S>) {
 
 | Approach | Static Dispatch | Dynamic Dispatch | Send | Syntax Overhead |
 |----------|:---:|:---:|:---:|---|
-| Native `async fn` in trait | ✅ | ❌ | Implicit | None |
+| Native `async fn` in trait | ✅ | ❌ | Chosen by the trait/API bounds | None |
 | `trait_variant` | ✅ | ❌ | Explicit | `#[trait_variant::make]` |
 | Manual `Box::pin` | ✅ | ✅ | Explicit | High |
 | `async-trait` crate | ✅ | ✅ | `#[async_trait]` | Medium (proc macro) |
@@ -289,6 +291,14 @@ async fn main() {
 </details>
 </details>
 
+> **Deep understanding — the real static-versus-dynamic dispatch trade-off**
+>
+> Static dispatch exposes each concrete future type to the compiler, enabling
+> inlining and avoiding per-call boxing, but may generate more monomorphized
+> code. Dynamic dispatch supports heterogeneous collections and plugin
+> boundaries, usually with `Pin<Box<dyn Future>>` allocation and indirection.
+> Choose based on the extension boundary, not just shorter syntax.
+
 > **Key Takeaways — Async Traits**
 > - Since Rust 1.75, you can write `async fn` directly in traits (no `#[async_trait]` crate needed)
 > - `trait_variant::make` auto-generates a `Send` variant for spawning tasks (static dispatch only)
@@ -298,5 +308,3 @@ async fn main() {
 > **See also:** [Ch 13 — Production Patterns](ch13-production-patterns.md) for Tower's `Service` trait, [Ch 6 — Building Futures by Hand](ch06-building-futures-by-hand.md) for manual trait implementations
 
 ***
-
-

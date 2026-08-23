@@ -177,7 +177,7 @@ await foreach (var user in GetUsers()) {
 <details>
 <summary><strong>🏋️ 练习：构建异步统计聚合器</strong>（点击展开）</summary>
 
-**挑战**：给定传感器读数 `Stream<Item = f64>`，编写异步函数消费它并返回数量、最小值、最大值和平均值。使用 `StreamExt` 组合器，不要先收集进 `Vec`。
+**挑战**：给定传感器读数 `Stream<Item = f64>`，编写异步函数消费它并返回 `(count, min, max, average)`（数量、最小值、最大值和平均值）。使用 `StreamExt` 组合器，不要先收集进 `Vec`。
 
 *提示*：用 `.fold()` 在 Stream 上累积状态。
 
@@ -344,7 +344,7 @@ impl<T: AsyncWrite + AsyncWriteExt + Unpin> FramedStream<T> {
 
 > **Tokio 与 futures I/O trait**：二者相似但不相同。Tokio 的 `AsyncRead` 使用 `ReadBuf` 安全处理未初始化内存，`futures::AsyncRead` 使用 `&mut [u8]`。可用 `tokio_util::compat` 转换。
 
-> **复制工具**：`tokio::io::copy` 是 `std::io::copy` 的异步版本，适合代理或文件传输；`copy_bidirectional` 会并发复制两个方向。
+> **复制工具**：`tokio::io::copy(&mut reader, &mut writer)` 是 `std::io::copy` 的异步版本，适合代理或文件传输；`tokio::io::copy_bidirectional` 会并发复制两个方向。
 
 <details>
 <summary><strong>🏋️ 练习：构建异步行计数器</strong>（点击展开）</summary>
@@ -380,7 +380,7 @@ async fn count_non_empty_lines<R: tokio::io::AsyncBufRead + Unpin>(
 // let count = count_non_empty_lines(tcp).await?;
 ```
 
-**关键点**：面向 `AsyncBufRead` 而不是具体类型编程，I/O 代码就能在文件、socket、管道和内存缓冲区之间复用。
+**关键点**：面向 `AsyncBufRead` 而不是具体类型编程，I/O 代码就能在文件、socket、管道和内存缓冲区之间复用。例如，内存数据可以包装为 `tokio::io::BufReader::new(std::io::Cursor::new(data))`。
 
 </details>
 </details>
@@ -390,7 +390,7 @@ async fn count_non_empty_lines<R: tokio::io::AsyncBufRead + Unpin>(
 > 下游只有调用 `poll_next` 才会请求下一项，因此单纯的 Stream 通常不会无限制地向消费者推送数据。但 `.buffer_unordered(N)` 会允许最多 N 个内层 Future 同时在途；N 就是吞吐、内存和下游承载能力之间的明确控制旋钮。
 
 > **要点回顾——Stream 与 AsyncIterator**
-> - `Stream` 是 `Iterator` 的异步对应物，产生 `Ready(Some(item))` 或以 `Ready(None)` 结束
+> - `Stream` 是 `Iterator` 的异步对应物，`yield` 出 `Poll::Ready(Some(item))`，或以 `Poll::Ready(None)` 结束
 > - `.buffer_unordered(N)` 同时处理 N 项，是 Stream 并发的关键工具
 > - `async_stream::stream!` 是创建自定义 Stream 的简便方法
 > - `AsyncRead`、`AsyncBufRead` 使 I/O 代码能在文件、socket 和管道间复用

@@ -109,13 +109,13 @@ async fn fetch_urls(urls: Vec<String>) -> Vec<Result<String, String>> {
 Build a task processor with:
 - A channel-based work queue
 - N worker tasks consuming from the queue
-- Graceful shutdown on Ctrl+C: stop accepting, finish in-flight work
+- Graceful shutdown on Ctrl+C: stop accepting, drain accepted work, finish in-flight work
 
 <details>
 <summary>🔑 Solution</summary>
 
 ```rust
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 
 struct WorkItem {
@@ -126,7 +126,6 @@ struct WorkItem {
 #[tokio::main]
 async fn main() {
     let (work_tx, work_rx) = mpsc::channel::<WorkItem>(100);
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Spawn 4 workers
     let mut worker_handles = Vec::new();
@@ -134,17 +133,11 @@ async fn main() {
 
     for id in 0..4 {
         let rx = work_rx.clone();
-        let mut shutdown = shutdown_rx.clone();
         let handle = tokio::spawn(async move {
             loop {
                 let item = {
                     let mut rx = rx.lock().await;
-                    tokio::select! {
-                        item = rx.recv() => item,
-                        _ = shutdown.changed() => {
-                            if *shutdown.borrow() { None } else { continue }
-                        }
-                    }
+                    rx.recv().await
                 };
 
                 match item {
@@ -177,10 +170,13 @@ async fn main() {
     // Wait for Ctrl+C
     tokio::signal::ctrl_c().await.unwrap();
     println!("\nShutdown signal received!");
-    shutdown_tx.send(true).unwrap();
-    producer.abort(); // Cancel the producer task
+    // Stop admission. Aborting the producer drops the last Sender, which closes
+    // the channel after already accepted items remain available to receivers.
+    producer.abort();
+    let _ = producer.await;
 
-    // Wait for workers to finish
+    // Workers keep receiving until the closed channel is empty, so queued and
+    // currently executing work both finish before shutdown completes.
     for handle in worker_handles {
         let _ = handle.await;
     }
@@ -383,4 +379,3 @@ impl<F: Future + Unpin> Future for Timeout<F> {
 </details>
 
 ***
-

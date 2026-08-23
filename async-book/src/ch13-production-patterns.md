@@ -3,7 +3,7 @@
 > **What you'll learn:**
 > - Graceful shutdown with `watch` channels and `select!`
 > - Backpressure: bounded channels prevent OOM
-> - Structured concurrency: `JoinSet` and `TaskTracker`
+> - Task-group lifecycle management with `JoinSet` and `TaskTracker`
 > - Timeouts, retries, and exponential backoff
 > - Error handling: `thiserror` vs `anyhow`, the double-`?` pattern
 > - Tower: the middleware pattern used by axum, tonic, and hyper
@@ -21,7 +21,7 @@ async fn main_server() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Spawn the server
-    let server_handle = tokio::spawn(run_server(shutdown_rx.clone()));
+    let mut server_handle = tokio::spawn(run_server(shutdown_rx.clone()));
 
     // Wait for Ctrl+C
     signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
@@ -35,33 +35,56 @@ async fn main_server() {
     // Wait for server to finish (with timeout)
     match tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        server_handle,
+        &mut server_handle,
     ).await {
         Ok(Ok(())) => println!("Server shut down gracefully"),
         Ok(Err(e)) => eprintln!("Server error: {e}"),
-        Err(_) => eprintln!("Server shutdown timed out — forcing exit"),
+        Err(_) => {
+            eprintln!("Server shutdown timed out — aborting remaining tasks");
+            server_handle.abort();
+            let _ = server_handle.await;
+        }
     }
 }
 
 async fn run_server(mut shutdown: watch::Receiver<bool>) {
+    let mut connections = tokio::task::JoinSet::new();
+
     loop {
         tokio::select! {
-            // Accept new connections
-            conn = accept_connection() => {
-                let shutdown = shutdown.clone();
-                tokio::spawn(handle_connection(conn, shutdown));
-            }
-            // Shutdown signal
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
+            // Fixed priority is intentional here: once shutdown is observable,
+            // do not accept another ready connection first.
+            biased;
+
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
                     println!("Stopping accepting new connections");
                     break;
                 }
             }
+            // Reap completed tasks during normal operation so their outputs do
+            // not accumulate until shutdown.
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                if let Err(e) = result {
+                    eprintln!("Connection task failed: {e}");
+                }
+            }
+            // Accept new connections
+            conn = accept_connection() => {
+                let shutdown = shutdown.clone();
+                connections.spawn(handle_connection(conn, shutdown));
+            }
         }
     }
-    // In-flight connections will finish on their own
-    // because they have their own shutdown_rx clone
+
+    // Every connection observes the same shutdown state. Because their handles
+    // remain in the JoinSet, returning from run_server now means they really
+    // have all finished rather than becoming detached background tasks.
+    while let Some(result) = connections.join_next().await {
+        if let Err(e) = result {
+            eprintln!("Connection task failed during shutdown: {e}");
+        }
+    }
 }
 
 async fn handle_connection(conn: Connection, mut shutdown: watch::Receiver<bool>) {
@@ -71,8 +94,8 @@ async fn handle_connection(conn: Connection, mut shutdown: watch::Receiver<bool>
                 // Process the request fully — don't abandon mid-request
                 process_request(request).await;
             }
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
                     // Finish current request, then exit
                     break;
                 }
@@ -138,9 +161,12 @@ async fn backpressure_example() {
 // Producer can fill memory indefinitely
 ```
 
-### Structured Concurrency: JoinSet and TaskTracker
+### Task Groups: JoinSet and TaskTracker
 
-`JoinSet` groups related tasks and ensures they all complete:
+`JoinSet` groups related tasks so the owner can collect every result and avoid
+detached work. This supports structured task lifetimes, but it is not a complete
+structured-concurrency guarantee by itself: you must still define cancellation,
+error propagation, and what dropping the group means.
 
 ```rust
 use tokio::task::JoinSet;
@@ -183,8 +209,11 @@ async fn with_tracker() {
         });
     }
 
-    tracker.close(); // No more tasks will be added
-    tracker.wait().await; // Wait for ALL tracked tasks
+    // close() marks the tracker as closed so wait() may complete once it is
+    // empty. It does not cancel tasks and does not forbid later spawn calls.
+    // Application ownership should separately stop producers from adding work.
+    tracker.close();
+    tracker.wait().await; // Wait for all currently tracked tasks to finish
     println!("All tasks finished");
 }
 ```
@@ -202,6 +231,13 @@ async fn with_timeout() -> Result<Response, Error> {
         Err(_) => Err(Error::Timeout),
     }
 }
+
+// timeout() cancels by dropping the inner future when the deadline expires.
+// Use it only when that operation is cancellation-safe, or run the operation in
+// a tracked task and define explicitly whether it may finish in the background.
+// In network services, prefer one end-to-end deadline budget and derive shorter
+// connect/read/write/idle limits from it instead of resetting a fresh full
+// timeout at every layer.
 
 // Exponential backoff retry
 async fn retry_with_backoff<F, Fut, T, E>(
@@ -400,13 +436,13 @@ let service = ServiceBuilder::new()
 <details>
 <summary>🏋️ Exercise (click to expand)</summary>
 
-**Challenge**: Build a task processor with a channel-based work queue, N worker tasks, and graceful shutdown on Ctrl+C. Workers should finish in-flight work before exiting.
+**Challenge**: Build a task processor with a channel-based work queue, N worker tasks, and graceful shutdown on Ctrl+C. Stop admitting new work, then drain accepted queued work and finish in-flight work before exiting.
 
 <details>
 <summary>🔑 Solution</summary>
 
 ```rust
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 
 struct WorkItem { id: u64, payload: String }
@@ -414,23 +450,16 @@ struct WorkItem { id: u64, payload: String }
 #[tokio::main]
 async fn main() {
     let (work_tx, work_rx) = mpsc::channel::<WorkItem>(100);
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let work_rx = std::sync::Arc::new(tokio::sync::Mutex::new(work_rx));
 
     let mut handles = Vec::new();
     for id in 0..4 {
         let rx = work_rx.clone();
-        let mut shutdown = shutdown_rx.clone();
         handles.push(tokio::spawn(async move {
             loop {
                 let item = {
                     let mut rx = rx.lock().await;
-                    tokio::select! {
-                        item = rx.recv() => item,
-                        _ = shutdown.changed() => {
-                            if *shutdown.borrow() { None } else { continue }
-                        }
-                    }
+                    rx.recv().await
                 };
                 match item {
                     Some(work) => {
@@ -443,16 +472,30 @@ async fn main() {
         }));
     }
 
-    // Submit work
-    for i in 0..20 {
-        let _ = work_tx.send(WorkItem { id: i, payload: format!("task-{i}") }).await;
-        sleep(Duration::from_millis(50)).await;
-    }
+    // A producer owns the only Sender. Once it stops, the channel closes after
+    // every already accepted item has been drained.
+    let producer = tokio::spawn(async move {
+        for i in 0..20 {
+            if work_tx
+                .send(WorkItem { id: i, payload: format!("task-{i}") })
+                .await
+                .is_err()
+            {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    });
 
     // On Ctrl+C: signal shutdown, wait for workers
     // NOTE: .unwrap() is used for brevity — handle errors in production.
     tokio::signal::ctrl_c().await.unwrap();
-    shutdown_tx.send(true).unwrap();
+    // Stop admission. Aborting the producer drops the last Sender. The workers
+    // can still receive every item that was already accepted into the queue.
+    producer.abort();
+    let _ = producer.await;
+
+    // recv() returns None only after the closed channel has been drained.
     for h in handles { let _ = h.await; }
     println!("Shut down cleanly.");
 }
@@ -464,12 +507,10 @@ async fn main() {
 > **Key Takeaways — Production Patterns**
 > - Use a `watch` channel + `select!` for coordinated graceful shutdown
 > - Bounded channels (`mpsc::channel(N)`) provide **backpressure** — senders block when the buffer is full
-> - `JoinSet` and `TaskTracker` provide **structured concurrency**: track, abort, and await task groups
-> - Always add timeouts to network operations — `tokio::time::timeout(dur, fut)`
+> - `JoinSet` and `TaskTracker` help track and await task groups; the application must still define admission closure, cancellation, and error propagation
+> - Give network work explicit deadline budgets and phase-specific limits; confirm that dropping a timed-out future is cancellation-safe
 > - Tower's `Service` trait is the standard middleware pattern for production Rust services
 
 > **See also:** [Ch 8 — Tokio Deep Dive](ch08-tokio-deep-dive.md) for channels and sync primitives, [Ch 12 — Common Pitfalls](ch12-common-pitfalls.md) for cancellation hazards during shutdown
 
 ***
-
-

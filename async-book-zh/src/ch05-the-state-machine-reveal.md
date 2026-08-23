@@ -3,7 +3,7 @@
 > **你将学到什么：**
 > - 编译器如何把 `async fn` 转换为枚举状态机
 > - 源代码与生成状态的并排对照
-> - `async fn` 中的大型栈分配为什么会让 Future 体积暴涨
+> - 为什么跨 `.await` 保存的大型内联值会让 Future 体积暴涨
 > - 析构优化：不再需要的值会尽早被丢弃
 
 ## 编译器究竟生成了什么
@@ -77,7 +77,7 @@ impl Future for FetchTwoPagesStateMachine {
 }
 ```
 
-> **注意**：以上语法糖展开只是一个*概念模型*。真实编译器输出会使用不安全的 Pin 投影；这里的 `get_mut()` 要求 `Unpin`，但异步状态机是 `!Unpin`。示例旨在展示状态转换，而不是给出可编译代码。
+> **注意**：以上语法糖展开只是一个*概念模型*。真实编译器输出会使用 `unsafe` Pin 投影；这里的 `get_mut()` 要求 `Unpin`，但异步状态机是 `!Unpin`。示例旨在展示状态转换，而不是给出可编译代码。
 
 ```mermaid
 stateDiagram-v2
@@ -100,9 +100,9 @@ stateDiagram-v2
 
 ### 为什么这会影响性能
 
-**零成本**：状态机是一个在栈上分配的枚举。每个 Future 不需要堆分配、垃圾收集或装箱——除非你显式使用 `Box::pin()`。
+**分配模型**：调用异步函数会创建一个具体的状态机值，并不会隐式地为每次调用单独进行堆分配。Future 最终存放在哪里由调用者决定：它可能是局部值、外层 Future 的字段、运行时任务分配中的一部分，也可能被显式装箱。Rust 不保证编译器生成的具体枚举布局。
 
-**大小**：枚举的大小等于其最大变体的大小。每个 `.await` 点都会产生一个新变体。因此：
+**大小**：可以把它理解为一个“最大暂停状态决定 Future 大小”的枚举，但这只是心智模型。每个 `.await` 都可能成为暂停点，编译器也可以合并状态、消除无用值并采用不同布局。真正影响大小的是哪些值跨暂停点仍然存活：
 
 ```rust
 async fn small() {
@@ -115,18 +115,18 @@ async fn small() {
 //      ≈ small!
 
 async fn big() {
-    let buf: [u8; 1_000_000] = [0; 1_000_000]; // 1MB on the stack!
+    let buf: [u8; 1_000_000] = [0; 1_000_000]; // Future 状态中内联保存 1 MB
     some_io().await;
     process(&buf);
 }
 // Size ≈ 1MB + inner future sizes
-// ⚠️ Don't stack-allocate huge buffers in async functions!
+// ⚠️ 不要让巨大的内联缓冲区跨 await 存活！
 // Use Vec<u8> or Box<[u8]> instead.
 ```
 
 **析构优化**：状态机发生转换时，会丢弃后续不再需要的值。在前例中，从 `WaitingPage1` 转换到 `WaitingPage2` 时，`fut1` 会被丢弃；编译器会自动插入析构逻辑。
 
-> **实用规则**：`async fn` 中的大型栈分配会让 Future 本身变得很大。如果异步代码出现栈溢出，请检查大型数组或深层嵌套的 Future；必要时用 `Box::pin()` 在堆上分配子 Future。
+> **实用规则**：跨 `.await` 仍然存活的大型内联值会让 Future 本身变大，与这个 Future 之后存放在何处无关。应优先缩短其生命周期，或把大型载荷放进 `Vec`、`Box` 等独立分配；只有测量确认 Future 大小或栈压力确实有问题时，才装箱子 Future。
 
 > **深入理解：任务栈与 Future 大小不是同一个概念**
 >
@@ -137,7 +137,7 @@ async fn big() {
 <details>
 <summary>🏋️ 练习（点击展开）</summary>
 
-**挑战**：根据以下异步函数，画出编译器生成的状态机。它有多少个状态（枚举变体）？每个状态保存哪些值？
+**挑战**：根据以下异步函数画出一种合理的**概念状态机**。每个暂停点必须保留哪些值？不要把变体数量或布局当成稳定 ABI 保证。
 
 ```rust
 async fn pipeline(url: &str) -> Result<usize, Error> {
@@ -151,7 +151,7 @@ async fn pipeline(url: &str) -> Result<usize, Error> {
 <details>
 <summary>🔑 答案</summary>
 
-共有五个状态：
+一种便于教学的模型包含五个状态：
 
 1. **Start**——保存 `url`
 2. **WaitingFetch**——保存 `url` 和 `fetch` Future
@@ -159,14 +159,14 @@ async fn pipeline(url: &str) -> Result<usize, Error> {
 4. **WaitingParse**——保存 `body` 和 `parse` Future
 5. **Done**——已经返回 `Ok(parsed.len())`
 
-每个 `.await` 都会创建一个让出执行权的暂停点，也就对应一个新枚举变体。`?` 会增加提前返回的路径，但不会增加额外状态；它只是对 `Poll::Ready` 中的值执行一次 `match`。
+每个 `.await` 都可能成为暂停点。`?` 增加提前返回的控制流，但本身并不必然要求新增暂停状态；实际表示可以由编译器自由优化。
 
 </details>
 </details>
 
 > **要点回顾——揭开状态机的面纱**
-> - `async fn` 会编译成枚举，每个 `.await` 点对应一个变体
-> - Future 的**大小**等于最大变体的大小；大型栈值会让它暴涨
+> - 应把 `async fn` 理解为带暂停点的状态机，具体枚举布局属于编译器实现细节
+> - 跨 `.await` 存活的值会占据 Future 状态；大型内联值可能使其体积意外增长
 > - 编译器会在状态转换时自动插入**析构**
 > - Future 体积成为问题时，可使用 `Box::pin()` 或其他堆分配方式
 

@@ -248,6 +248,13 @@ async fn cpu_heavy_work(items: &[Item]) {
 > without any `.await` points, it monopolizes the executor thread. Insert
 > `yield_now().await` periodically to enable cooperative multitasking.
 
+> **Deep understanding — wake is not “continue this call”**
+>
+> `wake()` normally marks a task runnable and enqueues it. It guarantees neither
+> immediate polling nor the same thread. Futures cannot depend on call-stack
+> continuation, thread-local state, or prompt scheduling; all state needed
+> across suspension belongs in the state machine.
+
 > **Key Takeaways — How Poll Works**
 > - An executor repeatedly calls `poll()` on futures that have been woken
 > - Futures must handle **spurious wakes** — always re-check the actual condition
@@ -257,5 +264,4 @@ async fn cpu_heavy_work(items: &[Item]) {
 > **See also:** [Ch 2 — The Future Trait](ch02-the-future-trait.md) for the trait definition, [Ch 5 — The State Machine Reveal](ch05-the-state-machine-reveal.md) for what the compiler generates
 
 ***
-
 

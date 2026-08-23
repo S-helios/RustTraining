@@ -17,9 +17,9 @@ This project integrates patterns from across the book into a single, production-
 Build a TCP chat server where:
 
 1. **Clients** connect via TCP and join named rooms
-2. **Messages** are broadcast to all clients in the same room
+2. **Messages** are fanned out to clients in the same room; the basic `broadcast` design is explicitly best-effort for slow clients
 3. **Commands**: `/join <room>`, `/nick <name>`, `/rooms`, `/quit`
-4. The server shuts down gracefully on Ctrl+C — finishing in-flight messages
+4. The server shuts down gracefully on Ctrl+C — stopping admission, notifying clients, and waiting for every tracked connection task up to a deadline
 
 ```mermaid
 graph LR
@@ -83,7 +83,11 @@ async fn main() -> anyhow::Result<()> {
 
 ## Step 2: Room State with Broadcast Channels
 
-Each room is a `broadcast::Sender`. All clients in a room subscribe to receive messages.
+Each room is a `broadcast::Sender`. Active clients subscribe to receive new
+messages. This is a bounded, best-effort fan-out: a receiver that falls behind
+can lose older values and observes `RecvError::Lagged`. If the product requires
+reliable delivery or true sender backpressure, give each client a bounded
+`mpsc` writer queue and define a slow-client policy instead.
 
 ```rust
 use std::collections::HashMap;
@@ -110,20 +114,23 @@ fn get_or_create_room(rooms: &mut HashMap<String, broadcast::Sender<String>>, na
 <details>
 <summary>💡 Hint — Client task structure</summary>
 
-Each client task needs two concurrent loops:
+Each client task needs two concurrent event sources:
 1. **Read from TCP** → parse commands or broadcast to room
 2. **Read from broadcast receiver** → write to TCP
 
-Use `tokio::select!` to run both:
+Use `tokio::select!` to run both. Prefer `lines().next_line()` here because it is
+cancellation-safe in `select!`; `read_line(&mut String)` is not cancellation-safe:
 
 ```rust
+let mut lines = BufReader::new(reader).lines();
+
 loop {
     tokio::select! {
         // Client sent us a line
-        result = reader.read_line(&mut line) => {
+        result = lines.next_line() => {
             match result {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
+                Ok(None) | Err(_) => break,
+                Ok(Some(line)) => {
                     // Parse command or broadcast message
                 }
             }
@@ -162,8 +169,8 @@ Implement the command protocol:
 Add Ctrl+C handling so the server:
 1. Stops accepting new connections
 2. Sends "Server shutting down..." to all rooms
-3. Waits for in-flight messages to drain
-4. Exits cleanly
+3. Retains every client `JoinHandle` in a `JoinSet` (or `TaskTracker`)
+4. Waits for connection tasks to flush their own writer and finish, up to a documented shutdown deadline; after the deadline, aborts the remainder
 
 ```rust
 use tokio::sync::watch;
@@ -186,7 +193,10 @@ loop {
 }
 ```
 
-**Your job**: Add `shutdown_rx.changed()` to each client's `select!` loop so clients exit when shutdown is signaled.
+**Your job**: Add `shutdown_rx.changed()` to each client's `select!` loop, retain
+all client tasks in a `JoinSet`, and await the set before the server returns.
+Merely sending a signal and dropping each `JoinHandle` would detach the tasks;
+that is not graceful shutdown.
 
 ## Step 5: Error Handling and Edge Cases
 
@@ -194,16 +204,31 @@ Production-harden the server:
 
 1. **Lagging receivers**: `broadcast::recv()` returns `RecvError::Lagged(n)` if a slow client misses messages. Handle it gracefully (log + continue, don't crash).
 2. **Nickname validation**: Reject empty or too-long nicknames.
-3. **Backpressure**: The broadcast channel buffer is bounded (100). If a client can't keep up, they get the `Lagged` error.
-4. **Timeout**: Disconnect clients that are idle for >5 minutes.
+3. **Slow-client policy**: A bounded `broadcast` buffer limits retained history, but it does **not** apply backpressure to senders. Treat `Lagged` as data loss, or switch to bounded per-client `mpsc` queues for real backpressure.
+4. **Idle deadline**: Disconnect clients that send no input for more than five minutes. Keep one `Sleep` future and reset it only after client input; do not recreate a full timeout whenever an unrelated broadcast branch wins.
 
 ```rust
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, Duration, Instant};
 
-// Wrap the read in a timeout:
-match timeout(Duration::from_secs(300), reader.read_line(&mut line)).await {
-    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break, // EOF, error, or timeout
-    Ok(Ok(_)) => { /* process line */ }
+let idle = sleep(Duration::from_secs(300));
+tokio::pin!(idle);
+
+loop {
+    tokio::select! {
+        result = lines.next_line() => {
+            match result {
+                Ok(Some(line)) => {
+                    idle.as_mut().reset(Instant::now() + Duration::from_secs(300));
+                    // Process client input.
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+        result = room_rx.recv() => {
+            // Handle message or Lagged. Room traffic does not reset input idle time.
+        }
+        _ = &mut idle => break,
+    }
 }
 ```
 
@@ -214,8 +239,12 @@ Write a test that starts the server, connects two clients, and verifies message 
 ```rust
 #[tokio::test]
 async fn two_clients_can_chat() {
-    // Start server in background
-    let server = tokio::spawn(run_server("127.0.0.1:0")); // Port 0 = OS picks
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // Bind before spawning so the test has the actual address and no startup race.
+    let server = tokio::spawn(run_server(listener, shutdown_rx));
 
     // Connect two clients
     let mut client1 = TcpStream::connect(addr).await.unwrap();
@@ -226,9 +255,19 @@ async fn two_clients_can_chat() {
 
     // Client 2 should receive it
     let mut buf = vec![0u8; 1024];
-    let n = client2.read(&mut buf).await.unwrap();
+    let n = tokio::time::timeout(Duration::from_secs(1), client2.read(&mut buf))
+        .await
+        .expect("message delivery timed out")
+        .unwrap();
     let msg = String::from_utf8_lossy(&buf[..n]);
     assert!(msg.contains("Hello from client 1"));
+
+    shutdown_tx.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .expect("server did not shut down")
+        .unwrap()
+        .unwrap();
 }
 ```
 
@@ -238,7 +277,7 @@ async fn two_clients_can_chat() {
 |-----------|--------|
 | Concurrency | Multiple clients in multiple rooms, no blocking |
 | Correctness | Messages only go to clients in the same room |
-| Graceful shutdown | Ctrl+C drains messages and exits cleanly |
+| Graceful shutdown | Stops admission, awaits tracked clients, enforces a deadline |
 | Error handling | Lagged receivers, disconnections, timeouts handled |
 | Code organization | Clean separation: accept loop, client task, room state |
 | Testing | At least 2 integration tests |

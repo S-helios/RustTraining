@@ -29,13 +29,18 @@ Every row is a decision someone must make, get right, and maintain — and none 
 
 ## "But Threads Are Expensive"
 
-The reflexive counter: "we need async because threads are expensive." Mostly wrong at the scale where most teams operate.
+The reflexive counter is "we need async because threads are expensive." That
+can be true, but it is not a sufficient design argument without workload data.
 
-- **Stack memory:** Each OS thread reserves 8MB of virtual address space (Linux default), but the OS only commits pages as touched — a mostly-idle thread uses 20-80KB of physical memory.
-- **Context switches:** ~1-5µs on modern hardware. At 50 concurrent requests, this is noise. At 100K switches/second, it's measurable.
-- **Creation cost:** ~10-30µs per thread on Linux. A thread pool (rayon, `std::thread::scope`) amortizes this to zero.
+- **Stack memory:** Reservation size, guard pages, and committed memory vary by OS, libc, language runtime, and configuration. Per-thread stacks can become a real capacity cost, but one universal number is misleading.
+- **Context switches:** Cost varies with hardware, scheduler state, cache locality, mitigations, and contention. Measure tail latency and throughput on the deployment target.
+- **Creation cost:** Thread pools amortize creation and are excellent for many workloads, but queueing, blocking behavior, and pool sizing still matter.
 
-The honest threshold where async earns its complexity is roughly **1K-10K concurrent mostly-idle connections** — the epoll/io_uring sweet spot where per-connection stacks become a real cost. Below that, a thread pool is simpler, faster to debug, and fast enough. Above that, async wins. Most services are below that.
+There is no portable connection-count threshold where async automatically wins.
+The decision depends on connection lifetime, time spent idle, memory budget,
+blocking dependencies, tail-latency goals, and team experience. Compare a
+bounded thread-pool design and an async design with representative load; choose
+the simpler design that meets measured capacity and latency requirements.
 
 ## The Hard Example: Logic That Also Needs I/O
 
@@ -201,7 +206,10 @@ async fn handler(req: Request) -> Response {
 }
 ```
 
-...that's the codebase telling you: **this logic was never async to begin with.** You don't need `spawn_blocking` — you need a sync module that the async handler calls directly:
+...that is a prompt to inspect the boundary. If the work is short and
+non-blocking, it can be a synchronous module called directly by the async
+handler. If it is CPU-heavy or calls blocking APIs, it still needs isolation
+through `spawn_blocking`, Rayon, or a dedicated pool:
 
 ```rust
 async fn handler(req: Request) -> Response {
@@ -212,7 +220,12 @@ async fn handler(req: Request) -> Response {
 }
 ```
 
-Reserve `spawn_blocking` for genuinely heavy CPU work (parsing large payloads, image processing, compression) where the time cost would actually starve the executor. For ordinary business logic that runs in microseconds, a direct sync call is simpler and correct.
+Use `spawn_blocking` for blocking APIs and bounded CPU work that would otherwise
+occupy executor threads for too long. Once a `spawn_blocking` closure starts, it
+usually cannot be aborted, so apply admission limits, cancellation checks where
+possible, and explicit shutdown policy. For short non-blocking business logic,
+a direct synchronous call is simpler and correct; confirm the boundary with
+measurement rather than a hard microsecond threshold.
 
 ## Libraries: Sync First, Async Wrapper Optional
 

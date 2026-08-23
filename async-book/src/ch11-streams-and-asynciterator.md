@@ -392,6 +392,13 @@ async fn count_non_empty_lines<R: tokio::io::AsyncBufRead + Unpin>(
 </details>
 </details>
 
+> **Deep understanding — Stream has pull-based backpressure**
+>
+> Downstream requests another item with `poll_next`, so a plain stream normally
+> does not push unbounded values into its consumer. `.buffer_unordered(N)` allows
+> at most N inner futures in flight; N explicitly balances throughput, memory,
+> and downstream capacity.
+
 > **Key Takeaways — Streams and AsyncIterator**
 > - `Stream` is the async equivalent of `Iterator` — yields `Poll::Ready(Some(item))` or `Poll::Ready(None)`
 > - `.buffer_unordered(N)` processes N stream items concurrently — the key concurrency tool for streams
@@ -401,5 +408,4 @@ async fn count_non_empty_lines<R: tokio::io::AsyncBufRead + Unpin>(
 > **See also:** [Ch 9 — When Tokio Isn't the Right Fit](ch09-when-tokio-isnt-the-right-fit.md) for `FuturesUnordered` (related pattern), [Ch 13 — Production Patterns](ch13-production-patterns.md) for backpressure with bounded channels
 
 ***
-
 

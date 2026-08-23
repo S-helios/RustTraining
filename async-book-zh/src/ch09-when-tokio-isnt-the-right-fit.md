@@ -53,7 +53,7 @@ async fn process_items(items: &[String]) {
 
 这确实令人烦恼。Go 可以简单地用闭包 `go func() { use(item) }`，而 Rust 的所有权系统迫使你明确谁拥有数据，以及数据要存活多久。
 
-### tokio::spawn 的替代方案
+### `tokio::spawn` 的替代方案
 
 并非每个问题都需要 `spawn`。以下三个工具分别解决*不同*约束：
 
@@ -158,12 +158,14 @@ where
 }
 ```
 
-> **经验法则**：库应依赖 `futures` crate，而不是 Tokio；应用程序再选择 Tokio 或其他运行时。这样整个生态才能自由组合。
+> **经验法则**：在确有价值时，让核心逻辑保持与运行时无关。如果库的 API 有意暴露 Tokio 特有的 I/O、定时器、同步原语或生态集成，那么依赖 Tokio 也完全合理。关键是把运行时依赖作为明确的 API 设计，而不是因为随手写了一个 `sleep` 就意外绑定运行时。
 
 <details>
 <summary><strong>🏋️ 练习：FuturesUnordered 与 Spawn</strong>（点击展开）</summary>
 
-**挑战**：用两种方法实现同一函数：一种使用 `tokio::spawn`（要求 `'static`），另一种使用 `FuturesUnordered`（借用数据）。函数接收 `&[String]`，模拟异步查询后返回每个字符串的长度。比较哪种方式需要 `.clone()`，哪种可以借用输入切片。
+**挑战**：用两种方法实现同一函数：一种使用 `tokio::spawn`（要求 `'static`），另一种使用 `FuturesUnordered`（借用数据）。函数接收 `&[String]`，模拟异步查询后返回每个字符串的长度。
+
+比较：哪种方式需要 `.clone()`？哪种方式可以直接借用输入切片？
 
 <details>
 <summary>🔑 答案</summary>
@@ -218,7 +220,7 @@ async fn test_both_versions() {
 }
 ```
 
-**关键点**：`FuturesUnordered` 在当前任务中运行所有 Future，不发生线程迁移，因此无需 `'static`。代价是它们共享一个任务；若某个 Future 阻塞，其余也会停滞。真正的 CPU 密集工作应交给 `spawn_blocking` 或专用线程池，而不是普通 `spawn`。
+**关键点**：`FuturesUnordered` 可以保存借用局部数据的 Future，是因为这些子 Future 仍由外层 Future 持有并在其中被轮询，而不是成为拥有独立生命周期的派生任务。这才是它不要求 `'static` 的原因；线程迁移对应的是另一个独立的 `Send` 问题。所有子 Future 共享同一个任务，因此任一子 Future 执行阻塞代码，整个集合都会停滞。CPU 密集型或阻塞型工作应交给 `spawn_blocking` 或专用 CPU 线程池，而不是普通 `tokio::spawn`。
 
 </details>
 </details>
@@ -229,9 +231,9 @@ async fn test_both_versions() {
 
 > **要点回顾——Tokio 并非最佳选择的场景**
 > - `FuturesUnordered` 在当前任务上并发运行 Future，无需 `'static`
-> - `LocalSet` 允许 `!Send` Future 在单线程执行器上运行
+> - `LocalSet` 配合 `spawn_local` 可以独立派生 `!Send` Future，但不会消除 `'static` 约束
 > - `JoinSet` 提供可管理、可清理的任务组
-> - 编写库时优先只依赖 `std::future::Future` 与 `futures`，不要直接绑定 Tokio
+> - 编写库时，在有利于复用的核心 API 中保持运行时无关；如果 Tokio 特有行为本就是接口契约，则应有意识地暴露 Tokio 依赖
 
 > **另请参阅：** [第 8 章——深入 Tokio](ch08-tokio-deep-dive.md)；[第 11 章——Stream](ch11-streams-and-asynciterator.md) 中的 `buffer_unordered()`。
 

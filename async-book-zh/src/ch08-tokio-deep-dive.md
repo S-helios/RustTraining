@@ -22,8 +22,9 @@ async fn main() {
 // Current-thread — everything runs on one thread
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    // Single-threaded — tasks don't need to be Send
-    // Lighter weight, good for simple tools or WASM
+    // 单线程调度器。直接 await 的 Future 可以是 !Send，
+    // 但 tokio::spawn 仍然要求 Send + 'static。
+    // 若要独立派生 !Send 任务，请使用 LocalSet + spawn_local。
 }
 
 // Manual runtime construction:
@@ -62,7 +63,7 @@ graph TB
 
 ### tokio::spawn 与 'static 要求
 
-`tokio::spawn` 把 Future 放入运行时的任务队列。由于它可能在*任意时间*由*任意工作线程*运行，Future 必须满足 `Send + 'static`：
+`tokio::spawn` 会创建一个拥有独立所有权的任务，并把它放入运行时的任务队列。无论采用 `multi_thread` 还是 `current_thread` 运行时，它的 API 都要求 Future 满足 `Send + 'static`：
 
 ```rust
 use tokio::task;
@@ -96,9 +97,11 @@ async fn problem() {
 }
 ```
 
-**为什么要求 `'static`？** 被派生的任务会独立运行，可能比创建它的作用域活得更久。编译器无法证明其中的引用一直有效，因此要求任务拥有数据。
+**为什么要求 `'static`？** 派生任务会独立运行，可能比创建它的作用域存活得更久。这里的 `'static` 表示 Future 内部不能包含生命周期更短的借用，并不是说任务或其中的值必须永远存活。通常的解决办法是把拥有所有权的值移入任务。
 
 **为什么要求 `Send`？** 任务恢复时可能位于与暂停时不同的线程。所有跨 `.await` 保存的数据都必须能够安全地在线程间发送。
+
+如果 Future 是 `!Send`，可以在当前线程执行上下文中使用 `LocalSet::spawn_local`，或者不派生新任务，直接在当前任务中 `.await`。仅仅把运行时改为 `current_thread`，并不会放宽 `tokio::spawn` 的类型约束。
 
 ```rust
 // Common pattern: clone shared data into the task
@@ -139,7 +142,7 @@ async fn cancellation_example() {
 }
 ```
 
-> **重要**：在 Tokio 中，丢弃 `JoinHandle` **不会**取消任务，只会让任务脱离管理并继续运行。必须显式调用 `.abort()`。这与直接丢弃 Future 不同；后者会丢弃并取消底层计算。
+> **重要**：在 Tokio 中，丢弃 `JoinHandle` **不会**取消任务，只会让任务脱离管理并继续运行。必须显式调用 `.abort()`。这与直接丢弃 `Future` 不同；后者会丢弃并取消底层计算。
 
 ### Tokio 同步原语
 
@@ -171,7 +174,9 @@ let (tx, rx) = oneshot::channel::<i32>();
 tx.send(42).unwrap(); // No await needed — either sends or fails
 let val = rx.await.unwrap();
 
-// broadcast: Multiple producers, multiple consumers (all get every message)
+// broadcast：多生产者、多消费者。
+// 接收者只要跟得上，就能看到订阅之后的新值；慢接收者可能丢失旧值，
+// 并收到 RecvError::Lagged。
 let (tx, _) = broadcast::channel::<String>(100);
 let mut rx1 = tx.subscribe();
 let mut rx2 = tx.subscribe();
@@ -182,7 +187,7 @@ tx.send(42).unwrap();
 println!("Latest: {}", *rx.borrow());
 ```
 
-> **注意**：通道示例中的 `.unwrap()` 只是为了简洁。生产代码应妥善处理收发错误：发送失败表示接收端已被丢弃；接收失败表示通道已关闭。
+> **注意**：通道示例中的 `.unwrap()` 只是为了简洁。生产代码应妥善处理收发错误：`.send()` 失败表示接收端已被丢弃；`.recv()` 失败表示通道已关闭。
 
 ```mermaid
 graph LR
@@ -190,7 +195,7 @@ graph LR
         direction TB
         MPSC["mpsc<br/>N→1<br/>带缓冲队列"]
         ONESHOT["oneshot<br/>1→1<br/>单个值"]
-        BROADCAST["broadcast<br/>N→N<br/>每位接收者收到全部消息"]
+        BROADCAST["broadcast<br/>N→N<br/>扇出；慢接收者可能落后"]
         WATCH["watch<br/>1→N<br/>只保留最新值"]
     end
 
@@ -209,13 +214,20 @@ graph LR
 
 ## 案例：为通知服务选择正确的通道
 
-假设你正在构建通知服务：多个 API 处理器产生事件；一个后台任务批量发送事件；配置监视器会在运行时更新限流规则；关闭信号必须到达所有组件。应当这样选择：
+假设你正在构建一个通知服务，它具有以下要求：
+
+- 多个 API 处理器产生事件
+- 一个后台任务对事件分批并发送
+- 配置监视器在运行时更新限流规则
+- 关闭状态必须传播到所有组件
+
+**每项需求应当选择哪一种通道？**
 
 | 需求 | 通道 | 原因 |
 |------|------|------|
 | API 处理器 → 批处理器 | 有界 `mpsc` | N 个生产者、1 个消费者；有界队列提供背压，批处理落后时让 API 放慢，而不是耗尽内存 |
 | 配置监视器 → 限流器 | `watch` | 只关心最新配置；多个工作线程都能看到当前值 |
-| 关闭信号 → 所有组件 | `broadcast` | 每个组件都必须独立收到关闭通知 |
+| 关闭状态 → 所有组件 | `watch` | 关闭是一种状态而非一次性事件；晚订阅或暂时繁忙的接收者仍能看到最新值 |
 | 单次健康检查响应 | `oneshot` | 一次请求/响应，只传一个值 |
 
 ```mermaid
@@ -225,9 +237,9 @@ graph LR
         API1["API 处理器 1"] -->|mpsc| BATCH["批处理器"]
         API2["API 处理器 2"] -->|mpsc| BATCH
         CONFIG["配置监视器"] -->|watch| RATE["限流器"]
-        CTRL["Ctrl+C"] -->|broadcast| API1
-        CTRL -->|broadcast| BATCH
-        CTRL -->|broadcast| RATE
+        CTRL["Ctrl+C"] -->|watch| API1
+        CTRL -->|watch| BATCH
+        CTRL -->|watch| RATE
     end
 ```
 
@@ -287,10 +299,10 @@ where
 > 示例先为所有输入创建并派生任务，只用 Semaphore 限制同时进入关键区的数量。如果输入可能无限增长，等待许可的任务本身仍会占用内存。生产系统通常还要使用有界 `mpsc` 控制排队总量，形成从入口到工作池的完整背压链路。
 
 > **要点回顾——深入 Tokio**
-> - 服务器通常使用默认 `multi_thread`；CLI、测试或 `!Send` 类型可考虑 `current_thread`
+> - 常规服务器通常使用 `multi_thread`；适合单调度线程的场景可使用 `current_thread`，若要派生 `!Send` Future，还需配合 `LocalSet` 与 `spawn_local`
 > - `tokio::spawn` 要求 `'static` Future；共享数据可使用 `Arc` 或通道
 > - 丢弃 `JoinHandle` **不会**取消任务，需显式调用 `.abort()`
-> - 按需求选择原语：共享状态用 `Mutex`，限并发用 `Semaphore`，通信使用 `mpsc`、`oneshot`、`broadcast` 或 `watch`
+> - 按语义选择原语：有界 `mpsc` 用于排队工作与背压，`oneshot` 用于单次响应，`broadcast` 用于允许慢接收者丢消息的扇出，`watch` 用于传播最新状态
 
 > **另请参阅：** [第 9 章——Tokio 并非最佳选择的场景](ch09-when-tokio-isnt-the-right-fit.md)；[第 12 章——常见陷阱](ch12-common-pitfalls.md) 中跨 await 持有 MutexGuard 的问题。
 

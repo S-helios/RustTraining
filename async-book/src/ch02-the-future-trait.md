@@ -160,6 +160,15 @@ impl Future for Delay {
 > In Rust, **you** (or the I/O library you use) are responsible for calling
 > `waker.wake()`. Forget it, and your program silently hangs.
 
+> **Deep understanding — why store the Waker and check twice?**
+>
+> A race exists between checking completion and registering the Waker: the
+> operation may finish immediately after the first check, when no Waker is yet
+> present. Registering first and checking again closes that lost-notification
+> window. Production futures should also use `Waker::will_wake` when deciding
+> whether to replace a stored Waker and publish state with suitable atomics or
+> synchronization.
+
 ### Exercise: Implement a CountdownFuture
 
 <details>
@@ -218,5 +227,4 @@ impl Future for CountdownFuture {
 > **See also:** [Ch 3 — How Poll Works](ch03-how-poll-works.md) for the executor loop, [Ch 6 — Building Futures by Hand](ch06-building-futures-by-hand.md) for more complex implementations
 
 ***
-
 

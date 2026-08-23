@@ -22,8 +22,9 @@ async fn main() {
 // Current-thread — everything runs on one thread
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    // Single-threaded — tasks don't need to be Send
-    // Lighter weight, good for simple tools or WASM
+    // Single-threaded scheduler. Futures awaited directly may be !Send,
+    // but tokio::spawn STILL requires Send + 'static.
+    // Use LocalSet + spawn_local for independently spawned !Send tasks.
 }
 
 // Manual runtime construction:
@@ -62,7 +63,7 @@ graph TB
 
 ### tokio::spawn and the 'static Requirement
 
-`tokio::spawn` puts a future onto the runtime's task queue. Because it might run on *any* worker thread at *any* time, the future must be `Send + 'static`:
+`tokio::spawn` creates an independently owned task and puts it on the runtime's task queue. Its API requires `Send + 'static` on **both** runtime flavors, including `current_thread`:
 
 ```rust
 use tokio::task;
@@ -96,9 +97,11 @@ async fn problem() {
 }
 ```
 
-**Why `'static`?** The spawned task runs independently — it might outlive the scope that created it. The compiler can't prove the references will remain valid, so it requires owned data.
+**Why `'static`?** The spawned task runs independently and may outlive the scope that created it. Here, `'static` means the future contains no borrowed data with a shorter lifetime; it does **not** mean the task or its values must live forever. Moving owned values into the task is the usual solution.
 
 **Why `Send`?** The task might be resumed on a different thread than where it was suspended. All data held across `.await` points must be safe to send between threads.
+
+If a future is `!Send`, use `LocalSet::spawn_local` on a current-thread execution context, or keep it inside the current task and await it directly. Merely selecting the `current_thread` runtime does not relax `tokio::spawn`'s bounds.
 
 ```rust
 // Common pattern: clone shared data into the task
@@ -174,7 +177,9 @@ let (tx, rx) = oneshot::channel::<i32>();
 tx.send(42).unwrap(); // No await needed — either sends or fails
 let val = rx.await.unwrap();
 
-// broadcast: Multiple producers, multiple consumers (all get every message)
+// broadcast: Multiple producers, multiple consumers.
+// Each active receiver sees new values while it keeps up; a slow receiver can
+// lose older values and gets RecvError::Lagged.
 let (tx, _) = broadcast::channel::<String>(100);
 let mut rx1 = tx.subscribe();
 let mut rx2 = tx.subscribe();
@@ -195,7 +200,7 @@ graph LR
         direction TB
         MPSC["mpsc<br/>N→1<br/>Buffered queue"]
         ONESHOT["oneshot<br/>1→1<br/>Single value"]
-        BROADCAST["broadcast<br/>N→N<br/>All receivers get all"]
+        BROADCAST["broadcast<br/>N→N<br/>Fan-out; slow receivers may lag"]
         WATCH["watch<br/>1→N<br/>Latest value only"]
     end
 
@@ -229,7 +234,7 @@ You're building a notification service where:
 |-------------|---------|-----|
 | API handlers → Batcher | `mpsc` (bounded) | N producers, 1 consumer. Bounded for backpressure — if the batcher falls behind, API handlers slow down instead of OOM |
 | Config watcher → Rate limiter | `watch` | Only the latest config matters. Multiple readers (each worker) see the current value |
-| Shutdown signal → All components | `broadcast` | Every component must receive the shutdown notification independently |
+| Shutdown state → All components | `watch` | Shutdown is state, not an event: late or temporarily busy receivers can still observe the latest value |
 | Single health-check response | `oneshot` | Request/response pattern — one value, then done |
 
 ```mermaid
@@ -239,9 +244,9 @@ graph LR
         API1["API Handler 1"] -->|mpsc| BATCH["Batcher"]
         API2["API Handler 2"] -->|mpsc| BATCH
         CONFIG["Config Watcher"] -->|watch| RATE["Rate Limiter"]
-        CTRL["Ctrl+C"] -->|broadcast| API1
-        CTRL -->|broadcast| BATCH
-        CTRL -->|broadcast| RATE
+        CTRL["Ctrl+C"] -->|watch| API1
+        CTRL -->|watch| BATCH
+        CTRL -->|watch| RATE
     end
 
     style API1 fill:#d4efdf,stroke:#27ae60,color:#000
@@ -303,14 +308,20 @@ where
 </details>
 </details>
 
+> **Deep understanding — concurrency limit is not a task-count limit**
+>
+> This example creates and spawns a task for every input, then uses the
+> semaphore only to limit how many enter the protected work at once. If input
+> can grow without bound, tasks waiting for permits still consume memory. A
+> production system usually also uses a bounded `mpsc` queue to cap total queued
+> work and create an end-to-end backpressure path from admission to workers.
+
 > **Key Takeaways — Tokio Deep Dive**
-> - Use `multi_thread` for servers (default); `current_thread` for CLI tools, tests, or `!Send` types
+> - Use `multi_thread` for typical servers; use `current_thread` when one scheduler thread is appropriate, and pair `LocalSet` with `spawn_local` for spawned `!Send` futures
 > - `tokio::spawn` requires `'static` futures — use `Arc` or channels to share data
 > - Dropping a `JoinHandle` does **not** cancel the task — call `.abort()` explicitly
-> - Choose sync primitives by need: `Mutex` for shared state, `Semaphore` for concurrency limits, `mpsc`/`oneshot`/`broadcast`/`watch` for communication
+> - Choose sync primitives by semantics: bounded `mpsc` for queued work and backpressure, `oneshot` for one reply, `broadcast` for lossy fan-out, and `watch` for latest-state propagation
 
 > **See also:** [Ch 9 — When Tokio Isn't the Right Fit](ch09-when-tokio-isnt-the-right-fit.md) for alternatives to spawn, [Ch 12 — Common Pitfalls](ch12-common-pitfalls.md) for MutexGuard-across-await bugs
 
 ***
-
-

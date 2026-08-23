@@ -83,7 +83,7 @@ Linux's `io_uring` (kernel 5.1+) represents a fundamental shift from the readine
 Readiness-based (epoll / mio / tokio):
   1. Ask: "Is this socket readable?"     → epoll_wait()
   2. Kernel: "Yes, it's ready"           → EPOLLIN event
-  3. App:   read(fd, buf)                → might still block briefly!
+  3. App:   nonblocking read(fd, buf)    → data, or EAGAIN if readiness changed
 
 Completion-based (io_uring):
   1. Submit: "Read from this socket into this buffer"  → SQE
@@ -140,10 +140,14 @@ fn main() {
 | **Syscalls** | epoll_wait + read/write | Batched SQE/CQE ring |
 | **Buffer ownership** | App retains (&mut buf) | Ownership transfer (move buf) |
 | **Platform** | Linux, macOS (kqueue), Windows (IOCP) | Linux 5.1+ only |
-| **Zero-copy** | No (userspace copy) | Yes (registered buffers) |
-| **Maturity** | Production-ready | Experimental |
+| **Copy behavior** | Usually copies between kernel and userspace | Registered buffers can reduce registration/pinning overhead; zero-copy depends on the specific operation |
+| **Maturity** | Mature default on supported runtimes | Useful in production niches, but ecosystem and operational trade-offs remain workload-specific |
 
-> **When to use io_uring**: High-throughput file I/O or networking where syscall overhead is the bottleneck (databases, storage engines, proxies serving 100k+ connections). For most applications, standard tokio with epoll is the right choice.
+> **When to use io_uring**: Consider it after profiling shows that syscall
+> submission/completion overhead or a completion-oriented API matters for your
+> workload. Benchmark on the target kernel, filesystem, device, and runtime; a
+> high connection count alone does not guarantee a win. Standard Tokio remains
+> the simpler default for most applications.
 
 ### tokio: The Batteries-Included Runtime
 
@@ -347,6 +351,14 @@ async fn main() {
 </details>
 </details>
 
+> **Deep understanding — an executor is not a complete runtime**
+>
+> The executor schedules tasks. A runtime commonly also provides an I/O reactor,
+> timers, async I/O types, a blocking pool, and synchronization primitives.
+> `Future` is the language contract; Tokio supplies surrounding infrastructure.
+> Generic futures can run on Tokio, while futures that call Tokio timers or I/O
+> need a Tokio runtime context.
+
 > **Key Takeaways — Executors and Runtimes**
 > - An executor's job: poll futures when woken, sleep efficiently using OS I/O APIs
 > - **tokio** is the default for servers; **smol** for minimal footprint; **embassy** for embedded
@@ -356,5 +368,3 @@ async fn main() {
 > **See also:** [Ch 8 — Tokio Deep Dive](ch08-tokio-deep-dive.md) for tokio specifics, [Ch 9 — When Tokio Isn't the Right Fit](ch09-when-tokio-isnt-the-right-fit.md) for alternatives
 
 ***
-
-

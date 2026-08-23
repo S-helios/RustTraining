@@ -17,9 +17,9 @@
 构建一个 TCP 聊天服务器：
 
 1. **客户端**通过 TCP 连接并加入命名房间
-2. **消息**广播给同房间所有客户端
+2. **消息**扇出给同房间客户端；基础 `broadcast` 方案明确采用尽力而为语义，慢客户端可能丢消息
 3. **命令**：`/join <room>`、`/nick <name>`、`/rooms`、`/quit`
-4. Ctrl+C 时优雅关闭，完成在途消息
+4. Ctrl+C 时优雅关闭：停止接收新连接、通知客户端，并在期限内等待所有已跟踪的连接任务
 
 ```mermaid
 graph LR
@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
 
 ## 第 2 步：使用 Broadcast 通道管理房间状态
 
-每个房间对应一个 `broadcast::Sender`，房间内客户端通过订阅接收消息。
+每个房间对应一个 `broadcast::Sender`，活跃客户端通过订阅接收新消息。这是一种有界、尽力而为的扇出：接收者跟不上时可能丢失旧值，并收到 `RecvError::Lagged`。如果产品要求可靠投递或真正对发送者施加背压，应为每个客户端建立有界 `mpsc` 写队列，并明确慢客户端处理策略。
 
 ```rust
 use std::collections::HashMap;
@@ -110,20 +110,22 @@ fn get_or_create_room(rooms: &mut HashMap<String, broadcast::Sender<String>>, na
 <details>
 <summary>💡 提示——客户端任务结构</summary>
 
-每个客户端任务需要同时推进两条循环：
+每个客户端任务需要同时推进两个事件源：
 1. **从 TCP 读取**→解析命令或广播到房间
 2. **从 broadcast 接收端读取**→写回 TCP
 
-使用 `tokio::select!` 同时运行两者：
+使用 `tokio::select!` 同时推进两者。这里应优先使用 `lines().next_line()`，因为它在 `select!` 中具有取消安全性；`read_line(&mut String)` 不具有取消安全性：
 
 ```rust
+let mut lines = BufReader::new(reader).lines();
+
 loop {
     tokio::select! {
         // Client sent us a line
-        result = reader.read_line(&mut line) => {
+        result = lines.next_line() => {
             match result {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
+                Ok(None) | Err(_) => break,
+                Ok(Some(line)) => {
                     // Parse command or broadcast message
                 }
             }
@@ -162,8 +164,8 @@ loop {
 加入 Ctrl+C 处理，使服务器：
 1. 停止接受新连接
 2. 向所有房间发送“服务器正在关闭……”
-3. 等待在途消息排空
-4. 干净退出
+3. 把每个客户端的 `JoinHandle` 保存在 `JoinSet`（或 `TaskTracker`）中
+4. 在明确的关闭期限内等待连接任务刷新自己的写入缓冲并结束；超过期限后中止剩余任务
 
 ```rust
 use tokio::sync::watch;
@@ -186,7 +188,7 @@ loop {
 }
 ```
 
-**你的任务**：在每个客户端的 `select!` 中加入 `shutdown_rx.changed()`，收到关闭信号后退出。
+**你的任务**：在每个客户端的 `select!` 中加入 `shutdown_rx.changed()`，把所有客户端任务保存在 `JoinSet` 中，并在服务器返回前等待整个集合。仅发送信号后丢弃各个 `JoinHandle` 会让任务脱离管理，并不属于优雅关闭。
 
 ## 第 5 步：错误处理与边界情况
 
@@ -194,16 +196,31 @@ loop {
 
 1. **落后的接收者**：慢客户端错过消息时，`broadcast::recv()` 返回 `RecvError::Lagged(n)`；记录日志并继续，不要崩溃。
 2. **昵称验证**：拒绝空昵称和过长昵称。
-3. **背压**：broadcast 缓冲区有界（100）；客户端跟不上时会收到 `Lagged` 错误。
-4. **超时**：断开空闲超过 5 分钟的客户端。
+3. **慢客户端策略**：有界 `broadcast` 缓冲区只限制保留的历史消息数量，**不会**对发送者施加背压。应把 `Lagged` 视为数据丢失；需要真正背压时，改用每客户端一个有界 `mpsc` 队列。
+4. **空闲期限**：客户端超过五分钟没有发送输入就断开。应保留一个 `Sleep` Future，并且只在收到客户端输入后重置；不能因为无关的广播分支就绪，就不断重新获得完整超时时间。
 
 ```rust
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, Duration, Instant};
 
-// Wrap the read in a timeout:
-match timeout(Duration::from_secs(300), reader.read_line(&mut line)).await {
-    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break, // EOF, error, or timeout
-    Ok(Ok(_)) => { /* process line */ }
+let idle = sleep(Duration::from_secs(300));
+tokio::pin!(idle);
+
+loop {
+    tokio::select! {
+        result = lines.next_line() => {
+            match result {
+                Ok(Some(line)) => {
+                    idle.as_mut().reset(Instant::now() + Duration::from_secs(300));
+                    // 处理客户端输入。
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+        result = room_rx.recv() => {
+            // 处理消息或 Lagged；房间流量不重置客户端输入空闲期限。
+        }
+        _ = &mut idle => break,
+    }
 }
 ```
 
@@ -214,8 +231,12 @@ match timeout(Duration::from_secs(300), reader.read_line(&mut line)).await {
 ```rust
 #[tokio::test]
 async fn two_clients_can_chat() {
-    // Start server in background
-    let server = tokio::spawn(run_server("127.0.0.1:0")); // Port 0 = OS picks
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // 先完成绑定再派生服务器，这样测试能拿到真实地址，也不存在启动竞态。
+    let server = tokio::spawn(run_server(listener, shutdown_rx));
 
     // Connect two clients
     let mut client1 = TcpStream::connect(addr).await.unwrap();
@@ -226,9 +247,19 @@ async fn two_clients_can_chat() {
 
     // Client 2 should receive it
     let mut buf = vec![0u8; 1024];
-    let n = client2.read(&mut buf).await.unwrap();
+    let n = tokio::time::timeout(Duration::from_secs(1), client2.read(&mut buf))
+        .await
+        .expect("message delivery timed out")
+        .unwrap();
     let msg = String::from_utf8_lossy(&buf[..n]);
     assert!(msg.contains("Hello from client 1"));
+
+    shutdown_tx.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .expect("server did not shut down")
+        .unwrap()
+        .unwrap();
 }
 ```
 
@@ -238,7 +269,7 @@ async fn two_clients_can_chat() {
 |-----------|--------|
 | 并发 | 多房间、多客户端，无阻塞调用 |
 | 正确性 | 消息只到达同房间客户端 |
-| 优雅关闭 | Ctrl+C 后排空消息并干净退出 |
+| 优雅关闭 | 停止接收新连接、等待已跟踪客户端，并执行关闭期限 |
 | 错误处理 | 处理落后接收者、断开和超时 |
 | 代码组织 | 接收循环、客户端任务和房间状态清晰分离 |
 | 测试 | 至少 2 个集成测试 |

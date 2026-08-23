@@ -109,13 +109,13 @@ async fn fetch_urls(urls: Vec<String>) -> Vec<Result<String, String>> {
 构建一个任务处理器，其中包含：
 - 基于通道的工作队列
 - 从队列消费的 N 个工作任务
-- Ctrl+C 时优雅关闭：停止接收新工作，完成在途工作
+- Ctrl+C 时优雅关闭：停止接收新工作，排空已接收工作，并完成在途工作
 
 <details>
 <summary>🔑 答案</summary>
 
 ```rust
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 
 struct WorkItem {
@@ -126,7 +126,6 @@ struct WorkItem {
 #[tokio::main]
 async fn main() {
     let (work_tx, work_rx) = mpsc::channel::<WorkItem>(100);
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Spawn 4 workers
     let mut worker_handles = Vec::new();
@@ -134,17 +133,11 @@ async fn main() {
 
     for id in 0..4 {
         let rx = work_rx.clone();
-        let mut shutdown = shutdown_rx.clone();
         let handle = tokio::spawn(async move {
             loop {
                 let item = {
                     let mut rx = rx.lock().await;
-                    tokio::select! {
-                        item = rx.recv() => item,
-                        _ = shutdown.changed() => {
-                            if *shutdown.borrow() { None } else { continue }
-                        }
-                    }
+                    rx.recv().await
                 };
 
                 match item {
@@ -177,10 +170,13 @@ async fn main() {
     // Wait for Ctrl+C
     tokio::signal::ctrl_c().await.unwrap();
     println!("\nShutdown signal received!");
-    shutdown_tx.send(true).unwrap();
-    producer.abort(); // Cancel the producer task
+    // 停止准入。中止生产者会丢弃最后一个 Sender，从而关闭通道；
+    // 已经接收进队列的工作仍然可以被接收端取出。
+    producer.abort();
+    let _ = producer.await;
 
-    // Wait for workers to finish
+    // Worker 会持续接收，直到已关闭通道中的队列被排空；因此关闭完成前，
+    // 已排队工作与正在执行的工作都会完成。
     for handle in worker_handles {
         let _ = handle.await;
     }

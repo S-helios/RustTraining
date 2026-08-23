@@ -348,6 +348,13 @@ where
 </details>
 </details>
 
+> **Deep understanding — cancellation semantics of combinators**
+>
+> When `Select` returns, the losing future is dropped and cancelled. External
+> side effects produced before its last `.await` are not rolled back. Every
+> `tokio::select!` branch must therefore be safe to cancel at any suspension
+> point, or the operation must be retained and completed deliberately.
+
 > **Key Takeaways — Building Futures by Hand**
 > - A future needs three things: state, a `poll()` implementation, and a waker registration
 > - `Join` polls both sub-futures; `Select` returns whichever finishes first
@@ -357,5 +364,4 @@ where
 > **See also:** [Ch 2 — The Future Trait](ch02-the-future-trait.md) for the trait definition, [Ch 8 — Tokio Deep Dive](ch08-tokio-deep-dive.md) for production-grade equivalents
 
 ***
-
 

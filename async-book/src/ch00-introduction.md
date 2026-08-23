@@ -91,6 +91,13 @@ Every content chapter has an inline exercise. The capstone (Ch 16) integrates ev
 - [Summary and Reference Card](ch16-summary-and-reference-card.md) — Quick-lookup tables and decision trees
 - [Capstone Project: Async Chat Server](ch17-capstone-project.md) — Build a complete async application
 
-***
+> **Deep understanding — the learning path of this book**
+>
+> Rust's `async/await` compiles asynchronous computation into ordinary Rust
+> types, then a library executor repeatedly calls `Future::poll`. Ownership,
+> borrowing, lifetimes, `Send`, `Sync`, and trait bounds therefore all carry
+> into async code. State machines and polling come before Tokio here so that you
+> understand what Tokio does instead of merely memorizing APIs.
 
+***
 

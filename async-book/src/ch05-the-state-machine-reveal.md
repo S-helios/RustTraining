@@ -3,7 +3,7 @@
 > **What you'll learn:**
 > - How the compiler transforms `async fn` into an enum state machine
 > - Side-by-side comparison: source code vs generated states
-> - Why large stack allocations in `async fn` blow up future sizes
+> - Why large inline values held across `.await` blow up future sizes
 > - The drop optimization: values drop as soon as they're no longer needed
 
 ## What the Compiler Actually Generates
@@ -99,9 +99,16 @@ stateDiagram-v2
 
 ### Why This Matters for Performance
 
-**Zero-cost**: The state machine is a stack-allocated enum. No heap allocation per future, no garbage collector, no boxing — unless you explicitly use `Box::pin()`.
+**Allocation model**: Calling an async function creates a concrete state-machine
+value without an implicit per-call heap allocation. The caller decides where
+that future lives: it may be a local value, a field inside another future, a
+runtime task allocation, or explicitly boxed. Rust does not specify the exact
+generated enum layout.
 
-**Size**: The enum's size is the maximum of all its variants. Each `.await` point creates a new variant. This means:
+**Size**: A useful mental model is an enum whose largest suspension state
+determines the future's size. Each `.await` is a possible suspension point, but
+the compiler may merge states, eliminate values, and choose a different layout.
+What matters in practice is which values remain live across suspension points:
 
 ```rust
 async fn small() {
@@ -114,27 +121,37 @@ async fn small() {
 //      ≈ small!
 
 async fn big() {
-    let buf: [u8; 1_000_000] = [0; 1_000_000]; // 1MB on the stack!
+    let buf: [u8; 1_000_000] = [0; 1_000_000]; // 1MB inside the future state
     some_io().await;
     process(&buf);
 }
 // Size ≈ 1MB + inner future sizes
-// ⚠️ Don't stack-allocate huge buffers in async functions!
+// ⚠️ Don't retain huge inline buffers across await points!
 // Use Vec<u8> or Box<[u8]> instead.
 ```
 
 **Drop optimization**: When a state machine transitions, it drops values no longer needed. In the example above, `fut1` is dropped when we transition from `WaitingPage1` to `WaitingPage2` — the compiler inserts the drop automatically.
 
-> **Practical rule**: Large stack allocations in `async fn` blow up the future's
-> size. If you see stack overflows in async code, check for large arrays or
-> deeply nested futures. Use `Box::pin()` to heap-allocate sub-futures if needed.
+> **Practical rule**: Large inline values that remain live across `.await` can
+> make the future itself huge, regardless of where that future is later stored.
+> Shorten lifetimes or move large payloads behind `Vec`, `Box`, or another owned
+> allocation. Box sub-futures only after measuring size or stack-pressure needs.
+
+> **Deep understanding — task stacks and future size are different concepts**
+>
+> An OS thread reserves a stack. An async task stores locals that remain live
+> across `.await` inside the future object. Values that die before suspension
+> can remain temporaries; only state that survives suspension enlarges the
+> future. Shortening lifetimes often beats blindly boxing the whole future.
 
 ### Exercise: Predict the State Machine
 
 <details>
 <summary>🏋️ Exercise (click to expand)</summary>
 
-**Challenge**: Given this async function, sketch the state machine the compiler generates. How many states (enum variants) does it have? What values are stored in each?
+**Challenge**: Given this async function, sketch one valid **conceptual** state
+machine. Which values must survive each suspension point? Do not treat the
+number or layout of compiler-generated variants as a stable ABI guarantee.
 
 ```rust
 async fn pipeline(url: &str) -> Result<usize, Error> {
@@ -148,7 +165,7 @@ async fn pipeline(url: &str) -> Result<usize, Error> {
 <details>
 <summary>🔑 Solution</summary>
 
-Five states:
+One useful teaching model has five states:
 
 1. **Start** — stores `url`
 2. **WaitingFetch** — stores `url`, `fetch` future
@@ -156,19 +173,19 @@ Five states:
 4. **WaitingParse** — stores `body`, `parse` future
 5. **Done** — returned `Ok(parsed.len())`
 
-Each `.await` creates a yield point = a new enum variant. The `?` adds early-exit paths but doesn't add extra states — it's just a `match` on the `Poll::Ready` value.
+Each `.await` is a possible suspension point. The `?` adds early-return control
+flow but does not inherently require another suspended state. The compiler is
+free to optimize the actual representation.
 
 </details>
 </details>
 
 > **Key Takeaways — The State Machine Reveal**
-> - `async fn` compiles to an enum with one variant per `.await` point
-> - The future's **size** = max of all variant sizes — large stack values blow it up
+> - Model `async fn` as a state machine with suspension points; its exact enum layout is an implementation detail
+> - Values live across `.await` contribute to the future's size; large inline values can make it unexpectedly large
 > - The compiler inserts **drops** at state transitions automatically
 > - Use `Box::pin()` or heap allocation when future size becomes a problem
 
 > **See also:** [Ch 4 — Pin and Unpin](ch04-pin-and-unpin.md) for why the generated enum needs pinning, [Ch 6 — Building Futures by Hand](ch06-building-futures-by-hand.md) to build these state machines yourself
 
 ***
-
-

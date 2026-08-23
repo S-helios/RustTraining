@@ -122,8 +122,9 @@ trait DataStore {
 // Now you have two traits:
 // - DataStore: no Send bound on the futures
 // - SendDataStore: all futures are Send
-// Both have the same methods, implementors implement DataStore
-// and get SendDataStore for free if their futures are Send.
+// 两个 trait 具有相同方法。需要更强约束时应实现生成的 SendDataStore；
+// trait_variant 会提供对应的本地 DataStore 实现。若只实现 DataStore，
+// 之后无法自动证明它满足更强的 SendDataStore 契约。
 
 // Use SendDataStore when you need to spawn tasks:
 async fn spawn_lookup<S: SendDataStore + 'static>(store: Arc<S>) {
@@ -142,7 +143,7 @@ async fn spawn_lookup<S: SendDataStore + 'static>(store: Arc<S>) {
 
 | 方案 | 静态分派 | 动态分派 | Send | 语法开销 |
 |------|:---:|:---:|:---:|---|
-| trait 中原生 `async fn` | ✅ | ❌ | 由实现决定 | 无 |
+| trait 中原生 `async fn` | ✅ | ❌ | 由 trait/API 约束决定 | 无 |
 | `trait_variant` | ✅ | ❌ | 显式变体 | `#[trait_variant::make]` |
 | 手工 `Box::pin` | ✅ | ✅ | 显式 | 高 |
 | `async-trait` crate | ✅ | ✅ | `#[async_trait]` | 中等（过程宏） |
@@ -151,7 +152,7 @@ async fn spawn_lookup<S: SendDataStore + 'static>(store: Arc<S>) {
 
 ### 异步闭包（Rust 1.85+）
 
-从 Rust 1.85 起，异步闭包已经稳定。它们可以捕获环境并返回 Future：
+从 Rust 1.85 起，`async closures`（异步闭包）已经稳定。它们可以捕获环境并返回 `Future`：
 
 ```rust
 // Before 1.85: awkward workaround
@@ -284,7 +285,7 @@ async fn main() {
 > 静态分派让编译器看到每个实现返回的具体状态机，便于内联且无需堆分配，但会生成更多单态化代码。动态分派统一返回类型，便于异构集合和插件式架构，却通常需要 `Pin<Box<dyn Future>>` 的分配与虚调用。应根据扩展边界选择，不要只因语法短就默认装箱。
 
 > **要点回顾——异步 Trait**
-> - Rust 1.75 起可以直接在 trait 中写 `async fn`
+> - Rust 1.75 起可以直接在 trait 中写 `async fn`，无需 `#[async_trait]`
 > - `trait_variant::make` 可生成适合派生任务的 `Send` 变体，但仍是静态分派
 > - 异步闭包（`async Fn()`）在 Rust 1.85 稳定，适合回调与中间件
 > - 性能敏感代码优先使用静态分派（`<S: Service>`），需要异构运行时多态时再用 `dyn`

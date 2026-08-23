@@ -86,10 +86,11 @@ async fn bad_mutex(data: &Mutex<Vec<String>>) {
 
 **Why this is usually a problem** — but not always:
 
-Holding a `std::sync::Mutex` across `.await` blocks the **OS thread** for the
-duration of the I/O, preventing the executor from polling other tasks on that
-thread. For short critical sections this is wasteful; for long I/O it's a
-performance trap.
+Holding a `std::sync::MutexGuard` across `.await` keeps the mutex locked while
+the holder is suspended. The suspended task does not itself occupy an OS
+thread, but another task that calls the blocking `lock()` on an executor thread
+can block that thread and starve unrelated futures. It also makes the critical
+section last for the entire I/O wait, increasing contention and deadlock risk.
 
 **However**, there are legitimate cases where you *must* hold a lock across an
 `.await` — the same way a database transaction holds a lock between read and
@@ -116,15 +117,17 @@ async fn scoped_mutex(data: &Mutex<Vec<String>>) {
 
 // OPTION 2: Use tokio::sync::Mutex — holds lock across .await without
 //           blocking the OS thread. Best when you need transactional
-//           read-modify-write across an await point.
+//           read-modify-write across an await point. This avoids blocking an
+//           executor thread while waiting for the lock, but still serializes
+//           all users for as long as the guard is held.
 use tokio::sync::Mutex as AsyncMutex;
 
 async fn async_mutex(data: &AsyncMutex<Vec<String>>) {
     let mut guard = data.lock().await; // Async lock — doesn't block the thread
     guard.push("item".into());
-    some_io().await; // OK — tokio Mutex guard is Send
+    some_io().await; // Thread isn't blocked, but the mutex remains locked
     guard.push("another".into());
-    // Guard held the whole time — no TOCTOU race, no thread blocked.
+    // Guard held the whole time — no TOCTOU race, but potentially high contention.
 }
 ```
 
@@ -141,13 +144,17 @@ async fn async_mutex(data: &AsyncMutex<Vec<String>>) {
 
 ### Cancellation Hazards
 
-Dropping a future cancels it — but this can leave things in an inconsistent state:
+Dropping a future cancels it, but only when its owner actually drops it. This
+does not preempt code in the middle of one `poll` call. Cancellation normally
+becomes observable at an `.await` where control has returned to the caller, and
+partially completed external side effects are not rolled back automatically:
 
 ```rust
 // ❌ DANGEROUS: Resource leak on cancellation
-async fn transfer(from: &Account, to: &Account, amount: u64) {
-    from.debit(amount).await;  // If cancelled HERE...
-    to.credit(amount).await;   // ...money vanishes!
+async fn transfer(from: &Account, to: &Account, amount: u64) -> Result<(), Error> {
+    from.debit(amount).await?;  // If cancelled HERE...
+    to.credit(amount).await?;   // ...money vanishes!
+    Ok(())
 }
 
 // ✅ SAFE: Make operations atomic or use compensation
@@ -160,16 +167,24 @@ async fn safe_transfer(from: &Account, to: &Account, amount: u64) -> Result<(), 
     Ok(())
 }
 
-// ✅ ALSO SAFE: Use tokio::select! with cancellation awareness
+// ✅ If shutdown must stop accepting work but let this operation finish,
+// retain the future after select! chooses shutdown, then await it explicitly.
+let transfer = transfer(from, to, amount);
+tokio::pin!(transfer);
+
 tokio::select! {
-    result = transfer(from, to, amount) => {
-        // Transfer completed
+    result = &mut transfer => {
+        result?;
     }
     _ = shutdown_signal() => {
-        // Don't cancel mid-transfer — let it finish
-        // Or: roll back explicitly
+        // `transfer` was not moved away. It is still alive and can finish.
+        transfer.await?;
     }
 }
+
+// If dropping a branch is acceptable, document and test that the operation is
+// cancellation-safe. Otherwise use a transaction, compensation, or a tracked
+// task with a clear shutdown deadline.
 ```
 
 ### No Async Drop
@@ -203,26 +218,34 @@ impl Drop for DbConnection {
 ```rust
 use tokio::sync::mpsc;
 
-// ❌ UNFAIR: busy_stream always wins, slow_stream starves
-async fn unfair(mut fast: mpsc::Receiver<i32>, mut slow: mpsc::Receiver<i32>) {
+// Default select! randomizes which branch is checked first when several are ready.
+// That improves fairness, but it cannot repair a branch that does too much work
+// before yielding.
+async fn default_fairness(mut fast: mpsc::Receiver<i32>, mut slow: mpsc::Receiver<i32>) {
     loop {
         tokio::select! {
             Some(v) = fast.recv() => println!("fast: {v}"),
             Some(v) = slow.recv() => println!("slow: {v}"),
-            // If both are ready, tokio randomly picks one.
-            // But if `fast` is ALWAYS ready, `slow` rarely gets polled.
+            // Keep each branch bounded and return to select! promptly.
         }
     }
 }
 
-// ✅ FAIR: Use biased select or drain in batches
-async fn fair(mut fast: mpsc::Receiver<i32>, mut slow: mpsc::Receiver<i32>) {
+// `biased;` means fixed priority, NOT fairness. It is useful when the priority
+// is intentional—for example, checking shutdown before ordinary work.
+async fn shutdown_first(
+    mut work: mpsc::Receiver<i32>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
     loop {
         tokio::select! {
-            biased; // Always check in order — explicit priority
+            biased;
 
-            Some(v) = slow.recv() => println!("slow: {v}"),  // Priority!
-            Some(v) = fast.recv() => println!("fast: {v}"),
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() { break; }
+            }
+            Some(v) = work.recv() => println!("work: {v}"),
+            else => break,
         }
     }
 }
@@ -263,21 +286,21 @@ A real-world scenario: a service handles requests fine for 10 minutes, then stop
 
 **Diagnosis steps:**
 
-1. **Attach `tokio-console`** — reveals 200+ tasks stuck in `Pending` state
-2. **Check task details** — all waiting on the same `Mutex::lock().await`
-3. **Root cause** — one task held a `std::sync::MutexGuard` across an `.await` and panicked, poisoning the mutex. All other tasks now fail on `lock().unwrap()`
+1. **Attach `tokio-console`** — reveals long poll times and a growing queue of tasks that make no progress
+2. **Inspect traces and thread dumps** — several executor threads are blocked in `std::sync::Mutex::lock`, while one task retains the guard across an `.await`
+3. **Root cause** — contention on a blocking mutex has starved the executor. If the holder panics, poisoning is a separate failure mode: later `lock().unwrap()` calls panic rather than wait asynchronously
 
 **The fix:**
 
 | Before (broken) | After (fixed) |
 |-----------------|---------------|
 | `std::sync::Mutex` | `tokio::sync::Mutex` |
-| `.lock().unwrap()` across `.await` | Scope lock before `.await` |
-| No timeout on lock acquisition | `tokio::time::timeout(dur, mutex.lock())` |
-| No recovery on poisoned mutex | `tokio::sync::Mutex` doesn't poison |
+| Blocking `.lock().unwrap()` contends on executor threads | Scope the guard before `.await`, or use an async mutex only when the guard must cross `.await` |
+| No visibility into long lock waits | Trace acquisition latency; add a timeout only when the caller has a defined recovery path |
+| Poisoning handled with `unwrap()` | Recover explicitly if invariants allow, or redesign ownership; Tokio's mutex does not use poisoning |
 
 **Prevention checklist:**
-- [ ] Use `tokio::sync::Mutex` if the guard crosses any `.await`
+- [ ] Prefer short, synchronous critical sections; use `tokio::sync::Mutex` only when a guard genuinely must cross `.await`
 - [ ] Add `#[tracing::instrument]` to async functions for span tracking
 - [ ] Run `tokio-console` in staging to catch hung tasks early
 - [ ] Add health check endpoints that verify task responsiveness
@@ -608,12 +631,10 @@ async fn test_producer_consumer() {
 > **Key Takeaways — Common Pitfalls**
 > - Never block the executor — use `spawn_blocking` for CPU/sync work
 > - Never hold a `MutexGuard` across `.await` — scope locks tightly or use `tokio::sync::Mutex`
-> - Cancellation drops the future instantly — use "cancel-safe" patterns for partial operations
+> - Cancellation by drop takes effect when the owner actually drops the future; make partially completed operations cancellation-safe
 > - Use `tokio-console` and `#[tracing::instrument]` for debugging async code
 > - Test async code with `#[tokio::test]` and `time::pause()` for deterministic timing
 
-> **See also:** [Ch 8 — Tokio Deep Dive](ch08-tokio-deep-dive.md) for sync primitives, [Ch 13 — Production Patterns](ch13-production-patterns.md) for graceful shutdown and structured concurrency
+> **See also:** [Ch 8 — Tokio Deep Dive](ch08-tokio-deep-dive.md) for sync primitives, [Ch 13 — Production Patterns](ch13-production-patterns.md) for graceful shutdown and task-group lifecycle management
 
 ***
-
-

@@ -166,9 +166,10 @@ where
 }
 ```
 
-> **Rule of thumb**: Libraries should depend on `futures` crate, not `tokio`.
-> Applications should depend on `tokio` (or their chosen runtime).
-> This keeps the ecosystem composable.
+> **Rule of thumb**: Keep core logic runtime-agnostic when practical. A library
+> may still depend on Tokio when its API intentionally exposes Tokio-specific
+> I/O, timers, synchronization, or integration. Make that runtime dependency an
+> explicit API decision rather than an accidental consequence of one `sleep`.
 
 <details>
 <summary><strong>🏋️ Exercise: FuturesUnordered vs Spawn</strong> (click to expand)</summary>
@@ -230,19 +231,25 @@ async fn test_both_versions() {
 }
 ```
 
-**Key takeaway**: `FuturesUnordered` avoids the `'static` requirement by running all futures on the current task (no thread migration). The trade-off: all futures share one task — if one blocks, the others stall. Use `spawn` for CPU-heavy work that should run on separate threads.
+**Key takeaway**: `FuturesUnordered` can hold futures that borrow local data because those futures remain owned by, and are polled inside, the enclosing future instead of becoming independent spawned tasks. This explains the missing `'static` requirement; thread migration is a separate `Send` concern. All child futures share one task, so blocking code in any child stalls the whole set. Use `spawn_blocking` or a dedicated CPU pool for CPU-bound or blocking work—not ordinary `tokio::spawn`.
 
 </details>
 </details>
+
+> **Deep understanding — spawn is an ownership boundary for concurrency**
+>
+> `spawn` is not merely syntax for “run at the same time.” It creates a task
+> with an independent lifetime, possible thread migration, and separately
+> managed result and cancellation. When several futures are child steps of one
+> operation, `join!`, `FuturesUnordered`, or a deliberately scoped task group
+> can preserve borrowing relationships and prevent detached work.
 
 > **Key Takeaways — When Tokio Isn't the Right Fit**
 > - `FuturesUnordered` runs futures concurrently on the current task — no `'static` requirement
-> - `LocalSet` enables `!Send` futures on a single-threaded executor
+> - `LocalSet` plus `spawn_local` enables independently spawned `!Send` futures; it does not remove the `'static` bound
 > - `JoinSet` (tokio 1.21+) provides managed task groups with automatic cleanup
-> - For libraries: depend only on `std::future::Future` + `futures` crate, not tokio directly
+> - For libraries: keep core APIs runtime-agnostic when useful, but expose a Tokio dependency deliberately when Tokio-specific behavior is part of the contract
 
 > **See also:** [Ch 8 — Tokio Deep Dive](ch08-tokio-deep-dive.md) for when spawn is the right tool, [Ch 11 — Streams](ch11-streams-and-asynciterator.md) for `buffer_unordered()` as another concurrency limiter
 
 ***
-
-

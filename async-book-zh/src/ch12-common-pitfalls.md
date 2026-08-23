@@ -86,7 +86,7 @@ async fn bad_mutex(data: &Mutex<Vec<String>>) {
 
 **为什么这通常有问题——但并非绝对：**
 
-跨 `.await` 持有 `std::sync::Mutex`，会在整个 I/O 等待期间阻塞**操作系统线程**，使执行器无法在该线程上轮询其他任务。短临界区这样做很浪费，长时间 I/O 更会成为严重的性能陷阱。
+跨 `.await` 持有 `std::sync::MutexGuard`，会在持有者挂起期间一直锁住互斥锁。这个已经挂起的任务本身并不会持续占用操作系统线程；真正的问题是，另一个任务若在执行器线程上调用阻塞式 `lock()`，就可能把该线程堵住，使无关 Future 也得不到轮询。同时，临界区会被拉长到覆盖整个 I/O 等待过程，从而提高争用与死锁风险。
 
 **不过**，确实存在必须跨 `.await` 持锁的情况，就像数据库事务会在读取与提交之间保持锁。释放后重新加锁会引入 **TOCTOU（检查时刻到使用时刻）竞态**：另一个任务可能在两段临界区之间修改数据。正确方案取决于实际语义：
 
@@ -109,15 +109,17 @@ async fn scoped_mutex(data: &Mutex<Vec<String>>) {
 
 // OPTION 2: Use tokio::sync::Mutex — holds lock across .await without
 //           blocking the OS thread. Best when you need transactional
-//           read-modify-write across an await point.
+//           read-modify-write across an await point. This avoids blocking an
+//           executor thread while waiting for the lock, but still serializes
+//           all users for as long as the guard is held.
 use tokio::sync::Mutex as AsyncMutex;
 
 async fn async_mutex(data: &AsyncMutex<Vec<String>>) {
     let mut guard = data.lock().await; // Async lock — doesn't block the thread
     guard.push("item".into());
-    some_io().await; // OK — tokio Mutex guard is Send
+    some_io().await; // 不阻塞线程，但互斥锁仍处于锁定状态
     guard.push("another".into());
-    // Guard held the whole time — no TOCTOU race, no thread blocked.
+    // 全程持锁：没有 TOCTOU 竞态，但可能产生严重争用。
 }
 ```
 
@@ -130,13 +132,14 @@ async fn async_mutex(data: &AsyncMutex<Vec<String>>) {
 
 ### 取消风险
 
-丢弃 Future 会取消它，但可能让系统停留在不一致状态：
+丢弃 Future 会取消它，但前提是它的所有者确实执行了丢弃；取消不能抢占正在执行的一次 `poll`。通常要等到某个 `.await` 把控制权交还给调用者之后，取消才会发生，而已经产生的外部副作用不会自动回滚：
 
 ```rust
 // ❌ DANGEROUS: Resource leak on cancellation
-async fn transfer(from: &Account, to: &Account, amount: u64) {
-    from.debit(amount).await;  // If cancelled HERE...
-    to.credit(amount).await;   // ...money vanishes!
+async fn transfer(from: &Account, to: &Account, amount: u64) -> Result<(), Error> {
+    from.debit(amount).await?;  // If cancelled HERE...
+    to.credit(amount).await?;   // ...money vanishes!
+    Ok(())
 }
 
 // ✅ SAFE: Make operations atomic or use compensation
@@ -149,16 +152,23 @@ async fn safe_transfer(from: &Account, to: &Account, amount: u64) -> Result<(), 
     Ok(())
 }
 
-// ✅ ALSO SAFE: Use tokio::select! with cancellation awareness
+// ✅ 如果关闭时只停止接收新工作，但必须让本次操作完成，
+// 就要在 select! 选中关闭分支后仍保留该 Future，并显式等待它。
+let transfer = transfer(from, to, amount);
+tokio::pin!(transfer);
+
 tokio::select! {
-    result = transfer(from, to, amount) => {
-        // Transfer completed
+    result = &mut transfer => {
+        result?;
     }
     _ = shutdown_signal() => {
-        // Don't cancel mid-transfer — let it finish
-        // Or: roll back explicitly
+        // `transfer` 没有被移走，仍然存活，可以继续执行到完成。
+        transfer.await?;
     }
 }
+
+// 如果允许落败分支被丢弃，就应明确记录并测试该操作具有取消安全性。
+// 否则应使用事务、补偿操作，或可跟踪且具有明确关闭期限的独立任务。
 ```
 
 ### 没有异步 Drop
@@ -192,26 +202,33 @@ impl Drop for DbConnection {
 ```rust
 use tokio::sync::mpsc;
 
-// ❌ UNFAIR: busy_stream always wins, slow_stream starves
-async fn unfair(mut fast: mpsc::Receiver<i32>, mut slow: mpsc::Receiver<i32>) {
+// 默认的 select! 会在多个分支都就绪时随机选择起始检查位置。
+// 这有助于公平性，但无法弥补某个分支在交还控制权之前执行过多工作的情况。
+async fn default_fairness(mut fast: mpsc::Receiver<i32>, mut slow: mpsc::Receiver<i32>) {
     loop {
         tokio::select! {
             Some(v) = fast.recv() => println!("fast: {v}"),
             Some(v) = slow.recv() => println!("slow: {v}"),
-            // If both are ready, tokio randomly picks one.
-            // But if `fast` is ALWAYS ready, `slow` rarely gets polled.
+            // 每个分支都应保持有界，并尽快回到 select!。
         }
     }
 }
 
-// ✅ FAIR: Use biased select or drain in batches
-async fn fair(mut fast: mpsc::Receiver<i32>, mut slow: mpsc::Receiver<i32>) {
+// `biased;` 表示固定优先级，而不是公平调度。只有在确实需要优先级时才使用，
+// 例如在普通工作之前优先检查关闭状态。
+async fn shutdown_first(
+    mut work: mpsc::Receiver<i32>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
     loop {
         tokio::select! {
-            biased; // Always check in order — explicit priority
+            biased;
 
-            Some(v) = slow.recv() => println!("slow: {v}"),  // Priority!
-            Some(v) = fast.recv() => println!("fast: {v}"),
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() { break; }
+            }
+            Some(v) = work.recv() => println!("work: {v}"),
+            else => break,
         }
     }
 }
@@ -242,7 +259,7 @@ async fn also_fast() {
 }
 ```
 
-> **陷阱**：`let a = fetch(url).await; let b = fetch(url).await;` 是顺序执行！第一次完成后才会开始第二次。需要并发时使用 `join!` 或 `spawn`。
+> **陷阱**：`let a = fetch(url).await; let b = fetch(url).await;` 是顺序执行！第二个 `.await` 要等第一个完成后才会开始。需要并发时使用 `join!` 或 `spawn`。
 
 ## 案例：调试挂起的生产服务
 
@@ -250,21 +267,21 @@ async fn also_fast() {
 
 **诊断步骤：**
 
-1. **连接 `tokio-console`**——发现 200 多个任务卡在 `Pending`
-2. **检查任务详情**——全部在等待同一个 `Mutex::lock().await`
-3. **根因**——某个任务跨 `.await` 持有 `std::sync::MutexGuard`，随后 panic 并毒化互斥锁；其他任务在 `lock().unwrap()` 处继续失败
+1. **连接 `tokio-console`**——发现轮询耗时异常，并且无法取得进展的任务队列持续增长
+2. **检查 trace 与线程转储**——多个执行器线程阻塞在 `std::sync::Mutex::lock`，同时某个任务跨 `.await` 保留着 Guard
+3. **根因**——阻塞式互斥锁的争用饿死了执行器。如果持锁任务 panic，互斥锁毒化是另一种独立故障：之后的 `lock().unwrap()` 会 panic，而不是异步等待
 
 **修复方法：**
 
 | 修复前 | 修复后 |
 |-----------------|---------------|
 | `std::sync::Mutex` | `tokio::sync::Mutex` |
-| 跨 `.await` 持有 `.lock().unwrap()` | 在 `.await` 前限制并释放锁 |
-| 获取锁没有超时 | `tokio::time::timeout(dur, mutex.lock())` |
-| 互斥锁毒化后无法恢复 | `tokio::sync::Mutex` 不使用毒化语义 |
+| 阻塞式 `.lock().unwrap()` 在执行器线程上发生争用 | 在 `.await` 前限制 Guard 的作用域；只有确实需要跨 `.await` 持锁时才使用异步 Mutex |
+| 无法观察长时间锁等待 | 记录获取锁的延迟；只有调用方有明确恢复策略时才增加超时 |
+| 使用 `unwrap()` 处理互斥锁毒化 | 仅在不变量允许时显式恢复，或重新设计所有权；Tokio Mutex 不采用毒化语义 |
 
 **预防清单：**
-- [ ] Guard 跨越任何 `.await` 时使用 `tokio::sync::Mutex`
+- [ ] 优先使用短小的同步临界区；只有 Guard 确实必须跨 `.await` 时才使用 `tokio::sync::Mutex`
 - [ ] 为异步函数添加 `#[tracing::instrument]`，跟踪 span
 - [ ] 在预发布环境运行 `tokio-console`，尽早发现挂起任务
 - [ ] 增加能够验证任务响应性的健康检查端点
@@ -368,7 +385,7 @@ $ tokio-console                                # Connects to 127.0.0.1:6669
 
 #### tracing + #[instrument]：异步结构化日志
 
-[`tracing`](https://docs.rs/tracing) 理解 Future 的生命周期。Span 会跨 `.await` 保持打开，因此即使任务换了操作系统线程，也能保留逻辑调用链：
+[`tracing`](https://docs.rs/tracing) 理解 `Future` 的生命周期。Span 会跨 `.await` 保持打开，因此即使任务换了操作系统线程，也能保留逻辑调用链：
 
 ```rust
 use tracing::{info, instrument};
@@ -394,8 +411,8 @@ async fn handle_request(user_id: u64, db_pool: &Pool) -> Result<Response> {
 
 | 症状 | 可能原因 | 工具 |
 |---------|-------------|------|
-| 任务永久挂起 | 缺少 `.await` 或 Mutex 死锁 | `tokio-console` 任务视图 |
-| 吞吐量低 | 异步线程上有阻塞调用 | poll 时间直方图 |
+| 任务永久挂起 | 缺少 `.await` 或 `Mutex` 死锁 | `tokio-console` 任务视图 |
+| 吞吐量低 | 异步线程上有阻塞调用 | `tokio-console` 的 poll 时间直方图 |
 | `Future is not Send` | 跨 `.await` 保存了非 Send 类型 | 编译器错误 + `#[instrument]` 定位 |
 | 莫名取消 | 上层 `select!` 丢弃了分支 | `tracing` span 生命周期事件 |
 
@@ -593,11 +610,11 @@ async fn test_producer_consumer() {
 
 > **要点回顾——常见陷阱**
 > - 绝不要阻塞执行器；CPU 或同步阻塞工作交给 `spawn_blocking`
-> - 通常不要跨 `.await` 持有 `MutexGuard`；缩小锁范围，确需事务语义时使用异步 Mutex
-> - 取消会立即丢弃 Future；部分完成可能破坏一致性的操作必须采用取消安全模式
+> - 通常不要跨 `.await` 持有 `MutexGuard`；缩小锁范围，确需事务语义时使用 `tokio::sync::Mutex`
+> - 通过丢弃实现的取消，要等所有者实际丢弃 `Future` 时才生效；可能部分完成的操作必须保证取消安全
 > - 使用 `tokio-console` 和 `#[tracing::instrument]` 调试异步代码
 > - 使用 `#[tokio::test]` 与 `time::pause()` 做确定性的时间测试
 
-> **另请参阅：** [第 8 章——深入 Tokio](ch08-tokio-deep-dive.md) 的同步原语；[第 13 章——生产实践模式](ch13-production-patterns.md) 的优雅关闭与结构化并发。
+> **另请参阅：** [第 8 章——深入 Tokio](ch08-tokio-deep-dive.md) 的同步原语；[第 13 章——生产实践模式](ch13-production-patterns.md) 的优雅关闭与任务组生命周期管理。
 
 ***

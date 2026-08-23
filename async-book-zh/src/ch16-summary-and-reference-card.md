@@ -45,8 +45,8 @@
 |---------|-----------|-----------|--------|----------|
 | `mpsc` | N | 1 | 连续消息 | 工作队列、事件总线 |
 | `oneshot` | 1 | 1 | 单值 | 请求/响应、完成通知 |
-| `broadcast` | N | N | 每人收到全部 | 扇出通知、关闭信号 |
-| `watch` | 1 | N | 只保留最新值 | 配置更新、健康状态 |
+| `broadcast` | N | N | 有界、允许丢失的扇出 | 能检测并容忍接收者落后的实时通知 |
+| `watch` | 1 | N | 只保留最新值 | 配置更新、健康状态、关闭状态 |
 
 ### Mutex 选择指南
 
@@ -73,7 +73,7 @@
 
 需要并发 Future？
 ├── 满足 'static + Send → tokio::spawn
-├── 满足 'static 但 !Send → LocalSet
+├── 满足 'static 但 !Send → LocalSet + spawn_local
 ├── 无法满足 'static → FuturesUnordered
 └── 需要跟踪/中止 → JoinSet
 ```
@@ -82,10 +82,10 @@
 
 | 错误 | 原因 | 修复 |
 |-------|-------|-----|
-| `future is not Send` | 跨 `.await` 保存了 `!Send` 类型 | 让该值在 `.await` 前析构，或使用 `current_thread` |
-| spawn 中借用值存活不够久 | `tokio::spawn` 要求 `'static` | 使用 `Arc`、`clone()` 或 `FuturesUnordered` |
-| `Future is not implemented for ()` | 缺少 `.await` | 为异步调用添加 `.await` |
-| poll 中无法可变借用 | 自引用借用问题 | 正确使用 `Pin<&mut Self>`（见第 4 章） |
+| `future is not Send` | 跨 `.await` 保存了 `!Send` 类型 | 在 `.await` 前丢弃该值、直接等待该 Future，或使用 `LocalSet::spawn_local`；仅改用 `current_thread` 不会改变 `tokio::spawn` |
+| spawn 中出现 `borrowed value does not live long enough` | `tokio::spawn` 要求 `'static` | 使用 `Arc`、`clone()` 或 `FuturesUnordered` |
+| `the trait Future is not implemented for ()` | 缺少 `.await` | 为异步调用添加 `.await` |
+| poll 中出现 `cannot borrow as mutable` | 自引用借用问题 | 正确使用 `Pin<&mut Self>`（见第 4 章） |
 | 程序静默挂起 | 忘记调用 `waker.wake()` | 每条 `Pending` 路径都必须登记并最终触发 Waker |
 
 ### 延伸阅读

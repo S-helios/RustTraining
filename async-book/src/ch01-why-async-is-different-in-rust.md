@@ -137,6 +137,14 @@ Async isn't free. For low-concurrency workloads, synchronous code can outperform
 
 **Benchmarking guidance**: If fewer than ~10 concurrent I/O operations, profile before committing to async. A simple `std::thread::spawn` per connection scales fine to hundreds of threads on modern Linux.
 
+> **Deep understanding — zero-cost does not mean zero overhead**
+>
+> “Zero-cost abstraction” means unused capabilities cost nothing and the
+> abstraction can compile close to a hand-written state machine. Scheduling,
+> retaining state, registering I/O, and waking tasks still have runtime costs.
+> Choose async because it can carry many waiting tasks on few threads, not
+> because the `async` keyword is inherently faster.
+
 ### Exercise: When Would You Use Async?
 
 <details>
@@ -169,5 +177,4 @@ For each scenario, decide whether async is appropriate and explain why:
 > **See also:** [Ch 2 — The Future Trait](ch02-the-future-trait.md) for the trait that makes this all work, [Ch 7 — Executors and Runtimes](ch07-executors-and-runtimes.md) for choosing your runtime
 
 ***
-
 

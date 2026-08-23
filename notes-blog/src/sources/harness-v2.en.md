@@ -1,7 +1,5 @@
 # Durable AgentHarness design
 
-> Source: [`earendil-works/pi`, branch `harness-v2`, `j4/packages/agent/docs/harness-v2.md`](https://github.com/earendil-works/pi/blob/harness-v2/j4/packages/agent/docs/harness-v2.md?plain=1). Retrieved on 2026-08-22 and preserved verbatim below for bilingual study.
-
 > **Compatibility policy.** Old coding-agent v3 JSONL sessions must open and restore idle. This is the only backward-compatibility requirement. All other formats and APIs in `packages/agent/src/harness` and `packages/session-backends/sqlite-node` (and their respective tests) may break. We do not write migrations, schema versioning, or conversion paths for anything else.
 
 ```mermaid
